@@ -10,14 +10,13 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import hitl, obs, run, session
-from .skills import insight_report
+from . import hitl, model_broker, obs, orchestrator, run, session
 from .tool_gateway import ToolGateway
 
 ROOT = Path(__file__).resolve().parents[2]
 UI_DIR = ROOT / "ui" / "chat"
 
-app = FastAPI(title="agent-os-kernel", version="0.1.0")
+app = FastAPI(title="agent-os-kernel", version="0.2.0")
 
 
 @app.on_event("startup")
@@ -40,10 +39,9 @@ def health() -> dict[str, Any]:
         "status": "ok",
         "service": "agent-os-kernel",
         "das_reachable": das_ok,
+        "model_mode": model_broker.model_mode(),
+        "chain": "ok" if das_ok else "degraded",
         "hitl_auto": hitl.auto_enabled(),
-        "llm": bool(
-            os.getenv("MODEL_API_KEY") or os.getenv("XAI_API_KEY") or os.getenv("OPENAI_API_KEY")
-        ),
     }
 
 
@@ -78,14 +76,13 @@ def post_message(session_id: str, body: MessageIn) -> dict[str, Any]:
     session.add_message(session_id, "user", body.text)
     r = run.create_run(session_id)
 
-    prior = session.list_messages(session_id)
-    # follow-up if session already has an assistant message before this user turn
-    assistant_before = sum(1 for m in prior[:-1] if m["role"] == "assistant")
-    is_followup = assistant_before > 0
-
-    result = insight_report.run_insight(r["id"], body.text, is_followup=is_followup)
+    result = orchestrator.handle_user_message(session_id, r["id"], body.text)
     md = result.get("markdown") or result.get("message") or ""
-    session.add_message(session_id, "assistant", md, run_id=r["id"])
+    if result.get("status") == "completed":
+        session.add_message(session_id, "assistant", md, run_id=r["id"])
+    elif result.get("status") == "awaiting_hitl":
+        # surface pause message; final answer comes after resume
+        session.add_message(session_id, "assistant", md, run_id=r["id"])
 
     return {
         "session_id": session_id,
@@ -94,7 +91,7 @@ def post_message(session_id: str, body: MessageIn) -> dict[str, Any]:
         "markdown": md,
         "hitl": result.get("hitl"),
         "evidence": result.get("evidence"),
-        "text": md,  # alias for UAT convenience
+        "text": md,
     }
 
 
@@ -115,10 +112,13 @@ def resume_run(run_id: str, body: HitlResume) -> dict[str, Any]:
         raise HTTPException(403, "bad resume_token")
     if not body.approve:
         run.set_state(run_id, "failed", result="HITL rejected")
+        obs.emit(run_id, "hitl", {"kind": rr.get("hitl_kind"), "approved": False})
         return {"status": "failed", "markdown": "已拒绝"}
-    result = insight_report.resume_after_hitl(run_id, body.text or "请继续生成报告")
+    obs.emit(run_id, "hitl", {"kind": rr.get("hitl_kind"), "approved": True})
+    result = orchestrator.resume_after_hitl(run_id, body.text or "请继续生成报告")
     md = result.get("markdown") or ""
-    session.add_message(rr["session_id"], "assistant", md, run_id=run_id)
+    if result.get("status") == "completed":
+        session.add_message(rr["session_id"], "assistant", md, run_id=run_id)
     return {"run_id": run_id, "status": result.get("status"), "markdown": md}
 
 

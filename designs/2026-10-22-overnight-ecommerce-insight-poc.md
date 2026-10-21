@@ -294,3 +294,10 @@ curl -s http://127.0.0.1:8787/health
 - [x] 报告含 DAS 证据锚点（非纯臆造）
 - [x] `uat.sh` PASS
 - [x] 本计划文件存在且与实现大体一致
+
+---
+
+## 附录：链路补强（同夜）
+
+用户反馈 stub 路径「技能旁路拼报告」后，已落地 Orchestrator + Model Broker StubBackend 同路径。详见 [2026-10-22-kernel-chain-hardening.md](./2026-10-22-kernel-chain-hardening.md)。
+
