@@ -1,0 +1,9 @@
+{"ts":"2026-10-21T23:00:00+08:00","from":"庆颃","to":"Grok","action":"reject","artifact":null,"summary":"否决第一刀为 C/B/A/D；真正目标是聊天式洞察/报告助理","refs":[]}
+{"ts":"2026-10-21T23:20:00+08:00","from":"Grok","to":"周矩白","action":"ask","artifact":"/workspace/designs/2026-10-21-enterprise-agent-dogfood-insight-report.md","summary":"改向洞察报告助理，征求架构补丁","refs":[]}
+{"ts":"2026-10-21T23:20:00+08:00","from":"Grok","to":"林可意","action":"ask","artifact":"/workspace/designs/2026-10-21-enterprise-agent-dogfood-insight-report.md","summary":"改向洞察报告助理，征求产品剧本","refs":[]}
+{"ts":"2026-10-21T23:32:00+08:00","from":"庆颃","to":"Grok","action":"approve","artifact":"/workspace/designs/2026-10-21-enterprise-agent-framework-m0-charter.md","summary":"confirm_charter：狗粮#1＝洞察报告助理，M0 宪章生效","refs":[]}
+{"ts":"2026-10-21T23:32:00+08:00","from":"Grok","to":"*","action":"note","artifact":"/workspace/designs/2026-10-21-enterprise-agent-framework-m0-charter.md","summary":"M0 宪章落地；批准前不拉陈嘉树；开放问题不挡 M1","refs":[]}
+{"ts":"2026-10-22T00:01:00+08:00","from":"庆颃","to":"Grok","action":"approve","artifact":null,"summary":"同意用协作事件日志做可观测，不强制 Playbook；先建公开仓再开工","refs":[]}
+{"ts":"2026-10-22T00:02:00+08:00","from":"庆颃","to":"Grok","action":"note","artifact":"https://github.com/weiqinghang/agent-os-kernel","summary":"仓库名定为 agent-os-kernel（公开）","refs":[]}
+{"ts":"2026-10-22T00:05:00+08:00","from":"庆颃","to":"Grok","action":"propose","artifact":null,"summary":"不全套 Playbook；借鉴其 Issue/MR 单一事实源与提交纪律","refs":[]}
+{"ts":"2026-10-22T00:05:30+08:00","from":"Grok","to":"*","action":"note","artifact":"designs/collab/PLAYBOOK-BORROW.md","summary":"主控确认：借 Issue 为源 + 提交纪律；不借种子全家桶/过度流程","refs":[]}
