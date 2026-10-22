@@ -76,10 +76,16 @@ RESP2=$(curl -sf -X POST "$BASE_K/sessions/$SID/messages" \
   -d '{"text":"第2条依据是什么？给我样本"}')
 echo "$RESP2" | grep -EEq '样本|ORD|evidence'
 echo "$RESP2" | python3 -c '
-import sys,json
+import re, sys, json
 d=json.load(sys.stdin)
-rid=d["run_id"]
-print("drill_run", rid)
+md=d.get("markdown") or ""
+m=re.search(r"这条发现讲的是渠道 \*\*(.+?)\*\*", md)
+assert m, md[:800]
+top=m.group(1)
+lines=[ln for ln in md.splitlines() if re.match(r"\d+\. ", ln)]
+assert lines, md[:800]
+assert all((" · "+top+" · ") in ln for ln in lines), (top, lines)
+print("PASS beat2 samples align", top, "n="+str(len(lines)), "run", d["run_id"])
 '
 RUN2=$(echo "$RESP2" | python3 -c 'import sys,json; print(json.load(sys.stdin)["run_id"])')
 curl -sf "$BASE_K/runs/$RUN2" | python3 -c '

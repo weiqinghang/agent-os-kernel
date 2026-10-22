@@ -53,6 +53,10 @@
     .chain-item.kind-hitl .chain-kind { color:#fcd34d; }
     .chain-item.kind-state .chain-kind { color:#c4b5fd; }
     .chain-detail { font-family:ui-monospace, SFMono-Regular, Menlo, monospace; font-size:11px; color:var(--muted); }
+    .empty-state { white-space:normal; }
+    .empty-title { font-weight:600; margin:0 0 4px; }
+    .empty-hint { color:var(--muted); font-size:13px; margin:0 0 8px; }
+    .example, .evidence-link { display:inline-block; margin:4px 8px 0 0; background:transparent; color:#bfdbfe; border:1px solid #334155; font-weight:500; font-size:13px; padding:6px 10px; white-space:nowrap; }
   </style>
 </head>
 <body>
@@ -73,7 +77,7 @@
       <button type="button" class="chip" data-tw="7" data-label="近7天" data-start="2025-10-15" data-end="2025-10-22">近7天</button>
     </div>
     <form id="f">
-      <input id="inp" type="text" placeholder="例如：请基于电商销量数据写一份简短洞察报告" autocomplete="off" />
+      <input id="inp" type="text" placeholder="描述你想看的范围或问题" autocomplete="off" />
       <button type="submit" id="send">发送</button>
     </form>
   </div>

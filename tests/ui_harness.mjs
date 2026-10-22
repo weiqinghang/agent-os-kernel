@@ -72,6 +72,33 @@ const CONCLUSION = [
   '<img class="leak-img" src="x">',
 ].join("\n");
 
+const LEAKY = [
+  "# 电商销量洞察报告（近90天）",
+  "",
+  "**范围**：dataset=`ecommerce_sales`；时间窗 2025-07-25 ~ 2025-10-22（近90天）。",
+  "dataset=ecommerce_sales 裸串",
+  "**数据概览**：销量稳定。",
+  "_evidence: overviewhash_",
+  "",
+  "## 发现",
+  "",
+  "1. **类目集中**：GMV 最高类目为 **电子产品**。",
+  "   - evidence: `aaaa1111`",
+  "",
+  "2. **渠道结构**：GMV 最高渠道为 **抖音电商**。",
+  "   - evidence: `deadbeefcafe`",
+  "   - evidence: `deadbeefcafe`",
+  "",
+  "3. **区域贡献**：GMV 最高省份为 **江苏**。",
+  "   - evidence: `bbbb2222`",
+  "",
+  "4. **退货风险**：按渠道退货率最高为 **拼多多**。",
+  "   - evidence: `cccc3333`",
+  "",
+  "---",
+  "_数字均来自 Tool Gateway；可追问下钻。_",
+].join("\n");
+
 let current = null;
 
 if (process.stdout._handle && process.stdout._handle.setBlocking) {
@@ -173,6 +200,20 @@ function successBody() {
 
 function releaseSpec(kind) {
   if (kind === "success") return { body: successBody(), events: realisticEvents() };
+  if (kind === "leaky") {
+    return {
+      body: {
+        run_id: RUN_ID,
+        status: "completed",
+        markdown: LEAKY,
+        text: LEAKY,
+        context_bindings: {
+          time_window: { label: "近90天", start: "2025-07-25", end: "2025-10-22" },
+        },
+      },
+      events: realisticEvents(),
+    };
+  }
   if (kind === "noevents") return { body: successBody(), events: [] };
   if (kind === "empty") return { body: { status: "completed", markdown: "  ", text: "" }, events: [] };
   if (kind === "runsFail") {
@@ -333,6 +374,8 @@ function snapshot() {
     maxConcurrentStrips: win.__maxConcurrentStrips || 0,
     imgCount: doc.querySelectorAll("img").length,
     leaks: findLeaks(visibleBlob(doc)),
+    placeholder: (doc.getElementById("inp") && doc.getElementById("inp").placeholder) || "",
+    userTexts: Array.from(doc.querySelectorAll(".msg.user .body")).map((el) => el.textContent || ""),
   };
 }
 
@@ -411,7 +454,10 @@ async function handle(msg) {
   if (msg.op === "click") return doClick(msg.text);
   if (msg.op === "label") return doLabel();
   if (msg.op === "debug") {
-    current.doc.getElementById("debug-chain").checked = !!msg.on;
+    const box = current.doc.getElementById("debug-chain");
+    box.checked = !!msg.on;
+    box.dispatchEvent(new current.win.Event("change", { bubbles: true }));
+    await wait(20);
     return snapshot();
   }
   if (msg.op === "flags") {

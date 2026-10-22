@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 SKILL: dict[str, Any] = {
@@ -129,10 +130,56 @@ def _report_plan(bindings: dict[str, Any]) -> list[dict[str, Any]]:
     ]
 
 
-def _drill_plan(bindings: dict[str, Any], user_text: str) -> list[dict[str, Any]]:
+# 报告四条发现的顺序是固定的：第 N 条要对齐该条的维度，不能整窗随便抽。
+_FINDINGS = {
+    1: ("category", "sum_gmv", "类目"),
+    2: ("channel", "sum_gmv", "渠道"),
+    3: ("province", "sum_gmv", "省份"),
+    4: ("channel", "return_rate", "退货渠道"),
+}
+
+
+def _finding_index(user_text: str) -> int | None:
+    m = re.search(r"第\s*([1-4])\s*条", user_text)
+    if m:
+        return int(m.group(1))
+    cn = {"一": 1, "二": 2, "三": 3, "四": 4}
+    m = re.search(r"第\s*([一二三四])\s*条", user_text)
+    if m:
+        return cn[m.group(1)]
+    return None
+
+
+def _top_key(tool_results: list[dict[str, Any]], group_by: str, metric: str) -> str | None:
+    stats = _pick(tool_results, "query_stats", group_by=group_by, metric=metric)
+    rows = ((stats or {}).get("data") or {}).get("rows") or []
+    if rows and rows[0].get("key"):
+        return str(rows[0]["key"])
+    return None
+
+
+def _drill_plan(
+    bindings: dict[str, Any],
+    user_text: str,
+    tool_results: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    tool_results = tool_results or []
     tw = _tw_args(bindings)
     base = {k: tw[k] for k in ("start", "end") if k in tw}
-    # Prefer category filter if mentioned; else sample top rows in window
+    idx = _finding_index(user_text)
+    if idx in _FINDINGS:
+        group_by, metric, _label = _FINDINGS[idx]
+        stats_args = {**base, "group_by": group_by, "metric": metric, "limit": 10}
+        plan: list[dict[str, Any]] = [{"name": "query_stats", "arguments": stats_args}]
+        top = _top_key(tool_results, group_by, metric)
+        if top:
+            plan.append(
+                {
+                    "name": "sample_records",
+                    "arguments": {**base, "limit": 5, "filters": {group_by: top}},
+                }
+            )
+        return plan
     filters: dict[str, Any] = {}
     for cat in ("电子产品", "服装", "美妆", "家居", "食品"):
         if cat in user_text:
@@ -204,25 +251,33 @@ def _build_report(tool_results: list[dict[str, Any]], bindings: dict[str, Any]) 
     return "\n".join(lines)
 
 
-def _build_drill(tool_results: list[dict[str, Any]]) -> str:
+def _build_drill(tool_results: list[dict[str, Any]], user_text: str = "") -> str:
+    idx = _finding_index(user_text)
+    spec = _FINDINGS.get(idx) if idx else None
+    top = None
+    dim = "样本"
+    if spec:
+        group_by, metric, dim = spec
+        top = _top_key(tool_results, group_by, metric)
     t = _pick(tool_results, "sample_records") or _pick(tool_results, "search_records") or {}
     data = t.get("data") or {}
     recs = data.get("records") or []
     fp = _fp(t)
+    title = f"第{idx}条依据" if idx else "发现依据"
+    lines = [f"## {title}", ""]
+    if top:
+        lines.append(f"这条发现讲的是{dim} **{top}**。下面只列出「{top}」的样本。")
+        lines.append("")
     if not recs:
-        return f"未取到样本行。\n\n_evidence: `{fp}`_"
-    lines = [
-        "## 发现依据 · 样本行",
-        "",
-        f"共 {data.get('count', len(recs))} 条样本（展示前 {min(5, len(recs))}）：",
-        "",
-    ]
-    for i, r in enumerate(recs[:5], 1):
-        lines.append(
-            f"{i}. `{r.get('order_id')}` · {r.get('sku')}/{r.get('category')} · "
-            f"{r.get('channel')} · {r.get('province')} · {r.get('order_date')} · "
-            f"GMV={r.get('gmv')} · returned={r.get('returned')}"
-        )
+        lines.append("没有抽到与这条发现对齐的样本。")
+    else:
+        lines.append(f"共 {data.get('count', len(recs))} 条样本（展示前 {min(5, len(recs))}）：")
+        lines.append("")
+        for i, r in enumerate(recs[:5], 1):
+            lines.append(
+                f"{i}. {r.get('order_id')} · {r.get('category')} · {r.get('channel')} · "
+                f"{r.get('province')} · {r.get('order_date')} · GMV={r.get('gmv')}"
+            )
     lines += ["", f"_evidence: `{fp}`_"]
     return "\n".join(lines)
 
@@ -262,7 +317,7 @@ def stub_decide(
     if intent == "report":
         plan = [c for c in _report_plan(bindings) if c["name"] in allowed_tools]
     elif intent == "drill":
-        plan = [c for c in _drill_plan(bindings, user_text) if c["name"] in allowed_tools]
+        plan = [c for c in _drill_plan(bindings, user_text, tool_results) if c["name"] in allowed_tools]
     else:
         plan = [c for c in _followup_plan(intent, bindings) if c["name"] in allowed_tools]
 
@@ -274,5 +329,5 @@ def stub_decide(
     if intent == "report":
         return {"type": "final", "content": _build_report(tool_results, bindings)}
     if intent == "drill":
-        return {"type": "final", "content": _build_drill(tool_results)}
+        return {"type": "final", "content": _build_drill(tool_results, user_text)}
     return {"type": "final", "content": _build_followup(intent, tool_results)}

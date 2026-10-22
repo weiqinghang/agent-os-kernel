@@ -6,11 +6,14 @@
 import {
   IMMEDIATE,
   debugLines,
+  presentAssistant,
   project,
   rebindLine,
   settings,
   visibleAssistant,
 } from "./progress.js";
+
+const EXAMPLES = ["近90天销量洞察", "哪个渠道卖得最好", "哪些省贡献最大"];
 
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, (c) => ({
@@ -60,14 +63,67 @@ export function boot(doc, win) {
     roleEl.className = "role";
     roleEl.textContent = role === "user" ? "你" : "助理";
     div.appendChild(roleEl);
-    const body = doc.createElement("div");
-    if (role === "assistant") body.innerHTML = simpleMd(text);
-    else body.textContent = text;
-    div.appendChild(body);
+    if (role === "assistant") paintAssistant(div, text);
+    else {
+      const body = doc.createElement("div");
+      body.className = "body";
+      body.textContent = text;
+      div.appendChild(body);
+    }
     if (extra) div.appendChild(extra);
     msgs.appendChild(div);
     msgs.scrollTop = msgs.scrollHeight;
     return div;
+  }
+
+  function paintAssistant(div, raw) {
+    div.__raw = raw;
+    const presented = presentAssistant(raw, debugOn());
+    let body = div.querySelector(".body");
+    if (!body) {
+      body = doc.createElement("div");
+      body.className = "body";
+      div.appendChild(body);
+    }
+    body.innerHTML = simpleMd(presented.text);
+    div.querySelectorAll(".evidence-link").forEach((el) => el.remove());
+    if (!debugOn()) {
+      presented.actions.forEach((action) => {
+        const btn = doc.createElement("button");
+        btn.type = "button";
+        btn.className = "evidence-link";
+        btn.textContent = action.label;
+        btn.addEventListener("click", () => submitText("第" + action.n + "条依据是什么"));
+        div.appendChild(btn);
+      });
+    }
+  }
+
+  function renderEmpty() {
+    const div = doc.createElement("div");
+    div.className = "msg assistant empty-state";
+    const roleEl = doc.createElement("div");
+    roleEl.className = "role";
+    roleEl.textContent = "助理";
+    const title = doc.createElement("p");
+    title.className = "empty-title";
+    title.textContent = "问我要一份洞察结论";
+    const hint = doc.createElement("p");
+    hint.className = "empty-hint";
+    hint.textContent = "会前直接点一个例子，或写下你想看的范围。";
+    div.appendChild(roleEl);
+    div.appendChild(title);
+    div.appendChild(hint);
+    EXAMPLES.forEach((question) => {
+      const btn = doc.createElement("button");
+      btn.type = "button";
+      btn.className = "example";
+      btn.textContent = question;
+      btn.addEventListener("click", () => submitText(question));
+      div.appendChild(btn);
+    });
+    msgs.appendChild(div);
+    msgs.scrollTop = msgs.scrollHeight;
   }
 
   function refreshMeta() {
@@ -138,6 +194,15 @@ export function boot(doc, win) {
     return !!(box && box.checked);
   }
 
+  const debugBox = doc.getElementById("debug-chain");
+  if (debugBox) {
+    debugBox.addEventListener("change", () => {
+      msgs.querySelectorAll(".msg.assistant").forEach((div) => {
+        if (div.__raw != null) paintAssistant(div, div.__raw);
+      });
+    });
+  }
+
   function maybeAppendDebug(parent, events) {
     if (!debugOn()) return;
     const details = doc.createElement("details");
@@ -204,10 +269,6 @@ export function boot(doc, win) {
     refreshMeta();
   }
 
-  function submitForm() {
-    form.dispatchEvent(new win.Event("submit", { bubbles: true, cancelable: true }));
-  }
-
   function askRebindConfirm(tw) {
     if (pendingRebind && pendingRebind.askEl) pendingRebind.askEl.remove();
     const card = doc.createElement("div");
@@ -227,8 +288,7 @@ export function boot(doc, win) {
         pendingRebind = null;
         await patchSessionTw(tw);
         setChipActive(chipKey(tw));
-        inp.value = "请基于电商销量数据写一份简短洞察报告";
-        submitForm();
+        submitText("用" + tw.label + "再出一版洞察报告");
       } catch (_) {
         addMsg("assistant", visibleAssistant("failed", ""));
       }
@@ -314,13 +374,12 @@ export function boot(doc, win) {
     maybeAppendDebug(msgEl, events);
   }
 
-  form.addEventListener("submit", async (e) => {
-    e.preventDefault();
-    const text = inp.value.trim();
-    if (!text) return;
+  async function submitText(text) {
+    const value = String(text || "").trim();
+    if (!value) return;
     inp.value = "";
     sendBtn.disabled = true;
-    addMsg("user", text);
+    addMsg("user", value);
     win.__stripsThisTurn = 0;
     const strip = showProgress();
     try {
@@ -328,7 +387,7 @@ export function boot(doc, win) {
       const r = await win.fetch("/sessions/" + sessionId + "/messages", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text, bindings: { time_window: currentTw } }),
+        body: JSON.stringify({ text: value, bindings: { time_window: currentTw } }),
       });
       const j = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error("http");
@@ -340,6 +399,11 @@ export function boot(doc, win) {
       sendBtn.disabled = false;
       if (inp.focus) inp.focus();
     }
+  }
+
+  form.addEventListener("submit", (e) => {
+    e.preventDefault();
+    submitText(inp.value);
   });
 
   async function resumeHitl(approve) {
@@ -371,10 +435,7 @@ export function boot(doc, win) {
 
   ensureSession()
     .then(() => {
-      addMsg(
-        "assistant",
-        "你好。三拍演示：①「写一份洞察报告」→ ②「第2条依据/样本」→ ③点上方时间窗 chip（如近30天）确认后再出一版。本切片仅开放时间窗绑定；退货风险 Skill 已推迟。"
-      );
+      renderEmpty();
     })
     .catch(() => {
       addMsg("assistant", visibleAssistant("failed", ""));

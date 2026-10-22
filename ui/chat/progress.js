@@ -108,3 +108,34 @@ export function visibleAssistant(status, markdown) {
   const trimmed = raw.trim();
   return trimmed || EMPTY_COPY;
 }
+
+/**
+ * 市场经理看见的结论。指纹、dataset、Tool Gateway 留在原文里，默认不上屏。
+ * 调试开关打开时原文照示，供对指纹。不另建脱敏服务。
+ */
+export function presentAssistant(markdown, debug) {
+  const raw = String(markdown || "");
+  if (debug) return { text: raw, actions: [] };
+  const actions = [];
+  const seen = new Set();
+  let finding = null;
+  const kept = [];
+  for (const line of raw.split(/\r?\n/)) {
+    const num = /^\s*(\d+)\.\s/.exec(line);
+    if (num) finding = Number(num[1]);
+    if (/evidence\s*:/i.test(line)) {
+      if (finding && !seen.has(finding)) {
+        seen.add(finding);
+        actions.push({ n: finding, label: "查看第" + finding + "条依据" });
+      }
+      continue;
+    }
+    if (/tool\s*gateway/i.test(line)) continue;
+    kept.push(
+      line
+        .replace(/dataset\s*=\s*`[^`]*`\s*[；;]?\s*/gi, "")
+        .replace(/dataset\s*=\s*\S+\s*[；;]?\s*/gi, "")
+    );
+  }
+  return { text: kept.join("\n"), actions };
+}
