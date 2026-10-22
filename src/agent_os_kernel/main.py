@@ -28,18 +28,12 @@ def _startup() -> None:
 
 @app.get("/health")
 def health() -> dict[str, Any]:
-    das_ok = False
-    try:
-        import httpx
-
-        r = httpx.get(os.getenv("FAKE_DAS_URL", "http://127.0.0.1:8788") + "/health", timeout=2.0)
-        das_ok = r.status_code == 200
-    except Exception:  # noqa: BLE001
-        das_ok = False
+    das_ok = ToolGateway().probe_health()
     return {
         "status": "ok",
         "service": "agent-os-kernel",
         "das_reachable": das_ok,
+        "dataset_id": context.DEFAULT_DATASET,
         "model_mode": model_broker.model_mode(),
         "chain": "ok" if das_ok else "degraded",
         "hitl_auto": hitl.auto_enabled(),

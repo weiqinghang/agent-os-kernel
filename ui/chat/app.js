@@ -241,7 +241,7 @@ export function boot(doc, win) {
       body: JSON.stringify({
         bindings: {
           skill: "insight_report",
-          dataset: "ecommerce_sales",
+          dataset: "ecommerce_sales_v2",
           time_window: currentTw,
         },
       }),

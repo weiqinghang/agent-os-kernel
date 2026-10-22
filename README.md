@@ -21,22 +21,30 @@ Session → Run → Orchestrator → Model Broker → Tool Gateway → HITL → 
 
 | 服务 | 端口 | 说明 |
 | --- | --- | --- |
-| fake-das | `127.0.0.1:8788` | SQLite ~1 万行电商销量；MCP 五工具白名单 |
-| agent-kernel | `127.0.0.1:8787` | 完整编排链 + 聊天 UI |
+| dataset-analysis-service | `127.0.0.1:8788` | **默认**。本地 SQLite，`APP_ENV=local`，uvicorn `--workers 2`，MCP 在 `/api/mcp` |
+| agent-kernel | `127.0.0.1:8787` | 完整编排链 + 聊天 UI。Tool Gateway 带 Bearer 打 `DAS_MCP_URL` |
+| fake-das | `127.0.0.1:8788` | 仅 `USE_FAKE_DAS=1`。过夜假服务，`/mcp` 无鉴权 |
 
 ### 启动 / 验收
 
 ```bash
 cd /workspace/agent-os-kernel
+# 真 DAS：/workspace/dataset-analysis-service + gitignored data/das-local.env
+# .env 里的 MODEL_* / XAI_* / OPENAI_* 会自动带上，不必再 export
 ./scripts/start.sh
 
 curl -s http://127.0.0.1:8787/health
-# 期望含 "model_mode":"stub","chain":"ok","das_reachable":true
+# 期望含 "chain":"ok","das_reachable":true,"dataset_id":"ecommerce_sales_v2"
 
 # 浏览器：http://127.0.0.1:8787/
 ./scripts/uat.sh
 ./scripts/stop.sh
+
+# 只有显式开关才回到过夜假 DAS
+USE_FAKE_DAS=1 ./scripts/start.sh
 ```
+
+密钥只放 gitignored 的 `data/das-local.env` 和 `.env`。运维细节见 [DAS-LOCAL-ON-BOX.md](designs/collab/DAS-LOCAL-ON-BOX.md)。
 
 默认 `HITL_AUTO=1`。设 `HITL_AUTO=0` 时 outline 会 pause，用 `POST /runs/{id}/resume`。
 
@@ -62,7 +70,7 @@ uv run pytest
 | 阶段 | 状态 |
 | --- | --- |
 | M0 宪章 | ✅ |
-| Overnight POC（假 DAS + 报告） | ✅ 箱内可跑 |
+| Overnight POC（假 DAS + 报告） | ✅ 箱内可跑；默认启动已切真 DAS，假服务仅 `USE_FAKE_DAS=1` |
 | Kernel chain hardening（同路径 stub/live） | ✅ |
 | M1 包边界 + 接口草图 | ⏳ |
 | M2 可跑内核 + 报告 Skill | 🚫 另令（嘉树） |

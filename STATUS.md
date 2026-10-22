@@ -1,5 +1,6 @@
 # Overnight POC STATUS
 
+- **DAS cutover (2026-10-22):** 默认 `./scripts/start.sh` 启动 `/workspace/dataset-analysis-service`（`APP_ENV=local`，workers 2，Bearer `DAS_MCP_URL`）。假 DAS 仅 `USE_FAKE_DAS=1`。见 `designs/collab/DAS-LOCAL-ON-BOX.md`。下面的 PID 表是过夜 POC 当时的快照。
 - **Updated:** 2026-10-22 08:28 Asia/Shanghai (CST, UTC+8)
 - **Result:** UAT PASS（晨间复测）· services RUNNING · demo ready
 - **SoT Issue:** https://github.com/weiqinghang/agent-os-kernel/issues/3
