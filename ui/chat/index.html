@@ -36,7 +36,10 @@
     .plan-card summary::before { content:"▸ "; color:var(--accent); }
     .plan-card[open] summary::before { content:"▾ "; }
     .plan-steps { margin:8px 0 0; padding-left:1.2em; }
-    .plan-steps li { margin:2px 0; }
+    .plan-steps li { margin:2px 0; display:flex; justify-content:space-between; gap:12px; align-items:baseline; }
+    .plan-status { color:var(--muted); font-size:12px; flex:none; }
+    .plan-card li[data-status="active"] .plan-status { color:#93c5fd; }
+    .plan-card li[data-status="done"] .plan-status { color:#86efac; }
     .progress-strip { align-self:flex-start; display:flex; align-items:center; gap:10px; padding:10px 14px; border-radius:999px; background:var(--bot); border:1px solid #2a3548; max-width:860px; }
     .progress-breathe { width:8px; height:8px; border-radius:50%; background:#93c5fd; animation:breathe 1.2s ease-in-out infinite; }
     .progress-text { font-size:14px; }

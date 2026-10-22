@@ -1,18 +1,22 @@
 """P0′ 产品行为：进度条带、脱敏、时间窗一行确认，以及 UAT 三件必须改。"""
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
 from pytest_bdd import given, parsers, scenarios, then, when
 
-from agent_os_kernel.skills.insight_report import SKILL, stub_decide
+from agent_os_kernel import model_broker, obs, orchestrator, run, session
+from agent_os_kernel.skills.insight_report import PLAN_PROGRESS, SKILL, apply_plan_progress, stub_decide
+from agent_os_kernel.tool_gateway import ToolGateway
 
 scenarios(str(Path(__file__).parent / "features" / "ui_p0_prime.feature"))
 scenarios(str(Path(__file__).parent / "features" / "midflight_progress.feature"))
 scenarios(str(Path(__file__).parent / "features" / "cancel_progress.feature"))
 scenarios(str(Path(__file__).parent / "features" / "insight_plan_card.feature"))
 scenarios(str(Path(__file__).parent / "features" / "failed_run_retry_ui.feature"))
+scenarios(str(Path(__file__).parent / "features" / "plan_card_progress.feature"))
 
 WHITELIST = {"处理中", "思考中", "正在查询数据", "正在整理结论", "等确认"}
 PLAN_LABELS = [
@@ -662,3 +666,209 @@ def retry_rejected(world):
 def not_resume(world):
     assert world["snap"]["resumePosts"] == 0
     assert world["snap"]["retryPosts"] == 1
+
+
+_PLAN_SECRETS = (
+    "list_datasets",
+    "describe_dataset",
+    "describe_fields",
+    "describe_tag_hierarchies",
+    "query_stats",
+    "search_records",
+    "sample_records",
+    "phase_",
+    "fingerprint",
+    "pending",
+    "active",
+    "done",
+    "skipped",
+    "stub",
+    "live",
+)
+
+
+@when("后台出现一次失败的查数")
+def push_failed_tool(world):
+    _call(world, {"op": "push", "kind": "failtool"})
+
+
+@when("后台再出现三次成功的查数")
+def push_three_tools(world):
+    for _ in range(3):
+        _call(world, {"op": "push", "kind": "tool"})
+
+
+@when("后台出现带结论的计划")
+def push_conclusion(world):
+    _call(world, {"op": "push", "kind": "conclusion"})
+
+
+@when("后台记下已经取消")
+def push_cancelled(world):
+    _call(world, {"op": "push", "kind": "stopped"})
+
+
+@then("计划卡只显示步骤和状态")
+def plan_label_and_status_only(world):
+    snap = world["snap"]
+    assert snap["planLabels"]
+    assert snap["planStatusText"]
+    assert set(snap["planStatusText"]) <= {"未开始", "进行中", "完成", "跳过"}
+    blob = "\n".join(snap["planLabels"] + snap["planStatusText"])
+    for secret in _PLAN_SECRETS:
+        assert secret not in blob
+    assert "query_stats" not in snap["body"]
+
+
+@then("计划卡第一步在进行且其余未开始")
+def first_active(world):
+    assert world["snap"]["planStatuses"] == ["active", "pending", "pending", "pending", "pending"]
+    assert world["snap"]["planStatusText"][0] == "进行中"
+
+
+@then("计划卡第一步已完成且下一步在进行")
+def first_done_next_active(world):
+    assert world["snap"]["planStatuses"][:2] == ["done", "active"]
+    assert world["snap"]["planStatusText"][:2] == ["完成", "进行中"]
+
+
+@then("计划卡前两步已完成且第三步在进行")
+def two_done_third_active(world):
+    assert world["snap"]["planStatuses"][:3] == ["done", "done", "active"]
+
+
+@then("计划卡步骤全部完成")
+def plan_all_done(world):
+    assert world["snap"]["planStatuses"] == ["done", "done", "done", "done", "done"]
+    assert set(world["snap"]["planStatusText"]) == {"完成"}
+
+
+@then("计划卡步骤全部未开始")
+def plan_all_pending(world):
+    assert world["snap"]["planStatuses"]
+    assert set(world["snap"]["planStatuses"]) == {"pending"}
+    assert set(world["snap"]["planStatusText"]) == {"未开始"}
+
+
+@then("事件里写的完成状态没有被照抄")
+def event_status_ignored(world):
+    snap = world["snap"]
+    assert snap["planLabels"][0] == "确认这次要看的范围"
+    assert snap["planStatuses"][0] == "active"
+    write = snap["planLabels"].index("整理结论")
+    assert snap["planStatuses"][write] == "pending"
+
+
+@then("结论步骤是进行中")
+def conclusion_active(world):
+    snap = world["snap"]
+    write = snap["planLabels"].index("整理结论")
+    assert snap["planStatuses"][write] == "active"
+    assert snap["planStatusText"][write] == "进行中"
+
+
+@then("计划卡已完成的步骤仍是完成")
+def done_stays_done(world):
+    assert world["snap"]["planStatuses"][0] == "done"
+    assert world["snap"]["planStatusText"][0] == "完成"
+
+
+@then("计划卡没做完的步骤是跳过")
+def unfinished_skipped(world):
+    rest = world["snap"]["planStatuses"][1:]
+    assert rest
+    assert set(rest) == {"skipped"}
+    assert "跳过" in world["snap"]["planStatusText"]
+
+
+@pytest.fixture
+def kernel(monkeypatch, tmp_path):
+    monkeypatch.setattr(obs, "DB_PATH", tmp_path / "kernel.db")
+    monkeypatch.setattr(model_broker, "has_llm", lambda: False)
+    for key in ("MODEL_API_KEY", "XAI_API_KEY", "OPENAI_API_KEY", "MODEL_BASE_URL", "MODEL_NAME"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("HITL_AUTO", "1")
+
+    def call(self, name, arguments=None, *, bindings=None):
+        del self, name, arguments, bindings
+        return {
+            "data": {
+                "rows": [{"key": "电子产品", "value": 1}],
+                "records": [],
+                "datasets": [{"name": "ecommerce_sales_v2"}],
+                "row_count": 1,
+                "summary": {"total_gmv": 1, "min_date": "a", "max_date": "b", "return_pct": 0},
+            },
+            "evidence": {"fingerprint": "fpxxxx", "tool": "query_stats"},
+        }
+
+    monkeypatch.setattr(ToolGateway, "call", call)
+    obs.init_db()
+    return {}
+
+
+@given("自动确认的洞察回合")
+def given_auto_kernel(kernel):
+    assert SKILL["plan_progress"] == PLAN_PROGRESS
+    blob = json.dumps(PLAN_PROGRESS, ensure_ascii=False)
+    for name in ("query_stats", "sample_records", "list_datasets", "describe_dataset"):
+        assert name not in blob
+    bindings = {
+        "skill": "insight_report",
+        "dataset": "ecommerce_sales_v2",
+        "time_window": {"label": "近90天", "start": "2025-07-25", "end": "2025-10-22"},
+    }
+    sid = session.create_session({"bindings": bindings})["id"]
+    session.add_message(sid, "user", "请基于电商销量数据写一份简短洞察报告")
+    kernel["sid"] = sid
+    kernel["rid"] = run.create_run(sid, context_bindings=bindings)["id"]
+
+
+@when("这份洞察回合跑完")
+def run_auto_kernel(kernel):
+    kernel["result"] = orchestrator.handle_user_message(
+        kernel["sid"],
+        kernel["rid"],
+        "请基于电商销量数据写一份简短洞察报告",
+    )
+
+
+@then("落库的事件种类没有 phase_ 前缀")
+def no_phase_kinds(kernel):
+    kinds = [event["kind"] for event in obs.list_events(kernel["rid"])]
+    assert kinds
+    assert not any(str(kind).startswith("phase_") for kind in kinds)
+    assert kernel["result"]["status"] == "completed"
+
+
+@then("落库的计划步骤仍都是未开始")
+def stored_plan_pending(kernel):
+    plans = [event for event in obs.list_events(kernel["rid"]) if event["kind"] == "plan"]
+    assert len(plans) == 1
+    payload = plans[0]["payload"]
+    assert set(payload) == {"revision", "steps"}
+    assert payload["revision"] == 1
+    assert all(step["status"] == "pending" for step in payload["steps"])
+
+
+@then("同一批事件按规则能算出已完成的步骤")
+def counted_done(kernel):
+    events = obs.list_events(kernel["rid"])
+    names = []
+    oks = 0
+    for event in events:
+        if event["kind"] != "tool_call":
+            continue
+        payload = event["payload"] if isinstance(event["payload"], dict) else {}
+        if payload.get("ok") is True:
+            oks += 1
+        tool = payload.get("tool")
+        if isinstance(tool, str):
+            names.append(tool)
+    assert oks >= 5
+    assert len(set(names)) >= 2
+    progress = apply_plan_progress(SKILL["plan_steps"], events)
+    assert [step["status"] for step in progress] == ["done"] * len(SKILL["plan_steps"])
+    blob = json.dumps(progress, ensure_ascii=False)
+    for name in names:
+        assert name not in blob

@@ -7,9 +7,20 @@ from typing import Any
 
 from ..context import SEED_DATASET_ID
 
+# 计划卡进度只看计数和步骤文案通配，不看工具名。编排不按步骤编号推进。
+PLAN_PROGRESS: list[dict[str, Any]] = [
+    {"when": "outline_confirm", "status": "pending"},
+    {"when": "tool_calls", "count": 1, "label": "*范围*"},
+    {"when": "tool_calls", "count": 2, "label": "*类目*"},
+    {"when": "tool_calls", "count": 3, "label": "*渠道*"},
+    {"when": "tool_calls", "count": 4, "label": "*省*"},
+    {"when": "tool_calls", "count": 5, "label": "*退货*"},
+    {"when": "finalizing", "label": "*结论*", "status": "active"},
+]
+
 SKILL: dict[str, Any] = {
     "name": "insight_report",
-    "version": "0.4.0",
+    "version": "0.5.0",
     "system_prompt": (
         "你是电商销量洞察报告助理。只用工具返回的聚合数字写中文结论，"
         "每条发现必须带 evidence 指纹；禁止臆造数字或绕过工具网关。"
@@ -48,6 +59,7 @@ SKILL: dict[str, Any] = {
         {"id": "province", "label": "看清各省贡献"},
         {"id": "returns", "label": "看清退货风险"},
     ],
+    "plan_progress": PLAN_PROGRESS,
     "default_bindings": {
         "dataset": SEED_DATASET_ID,
         "time_window": {"label": "近90天", "start": "2025-07-25", "end": "2025-10-22"},
@@ -353,3 +365,193 @@ def stub_decide(
     if intent == "drill":
         return {"type": "final", "content": _build_drill(tool_results, user_text)}
     return {"type": "final", "content": _build_followup(intent, tool_results)}
+
+
+_SEEKING_TYPES = {"tool_calls", "live_retry", "live_fallback", "live_fallback_stub"}
+_WRITING_TYPES = {"final", "finalizing", "loop_break"}
+
+
+def _event_payload(event: dict[str, Any]) -> dict[str, Any]:
+    raw = event.get("payload")
+    return raw if isinstance(raw, dict) else {}
+
+
+def _label_matches(label: str, pattern: str) -> bool:
+    """通配只按字面片段顺序匹配步骤文案。`*` 以外的字是必须出现的片段。"""
+    parts = [part for part in pattern.split("*") if part]
+    if not parts:
+        return False
+    pos = 0
+    for part in parts:
+        found = label.find(part, pos)
+        if found < 0:
+            return False
+        pos = found + len(part)
+    return True
+
+
+def _writing_model_step(payload: dict[str, Any]) -> bool:
+    """与呼吸条同一套收尾判定。不读工具名。"""
+    kind = payload.get("type")
+    kind = kind if isinstance(kind, str) else ""
+    if kind in _SEEKING_TYPES:
+        return False
+    if kind in _WRITING_TYPES:
+        return True
+    if payload.get("finalizing") is True:
+        return True
+    if payload.get("loop_break") is True:
+        return True
+    if payload.get("n_calls") == 0 and kind:
+        return True
+    return False
+
+
+def _progress_signals(events: list[Any] | None) -> dict[str, Any]:
+    outline = False
+    seen_outline = False
+    successes = 0
+    finalizing = False
+    cancelled = False
+    for event in events or []:
+        if not isinstance(event, dict):
+            continue
+        kind = event.get("kind")
+        payload = _event_payload(event)
+        if kind == "tool_call":
+            if payload.get("ok") is True:
+                successes += 1
+            continue
+        if kind == "hitl" and payload.get("kind") == "outline_confirm":
+            if payload.get("auto") is True or payload.get("approved") is True:
+                outline = False
+                seen_outline = False
+            else:
+                outline = True
+                seen_outline = True
+            continue
+        if kind == "state":
+            state = payload.get("state")
+            state = state if isinstance(state, str) else ""
+            held = payload.get("hitl_kind") == "outline_confirm" or seen_outline
+            if state == "awaiting_hitl" and held:
+                outline = True
+                seen_outline = True
+            elif seen_outline and state and state != "awaiting_hitl":
+                outline = False
+            if state == "failed":
+                finalizing = False
+            elif state == "cancelled":
+                cancelled = True
+            elif state in {"completed", "finalizing"}:
+                finalizing = True
+            continue
+        if kind == "model_step" and _writing_model_step(payload):
+            finalizing = True
+            continue
+        if kind == "assistant":
+            finalizing = True
+    return {
+        "outline_confirm": outline,
+        "successful_tool_calls": successes,
+        "finalizing": finalizing,
+        "cancelled": cancelled,
+    }
+
+
+def _clean_progress_steps(steps: list[Any] | None) -> list[dict[str, str]]:
+    clean: list[dict[str, str]] = []
+    if not isinstance(steps, list):
+        return clean
+    for item in steps:
+        if not isinstance(item, dict):
+            continue
+        label = item.get("label")
+        if not isinstance(label, str) or not label.strip():
+            continue
+        step_id = item.get("id")
+        clean.append(
+            {
+                "id": step_id.strip() if isinstance(step_id, str) else "",
+                "label": label.strip(),
+            }
+        )
+    return clean
+
+
+def _rule_when(rules: list[Any], when: str) -> bool:
+    return any(isinstance(rule, dict) and rule.get("when") == when for rule in rules)
+
+
+def _statuses_from_counts(steps: list[dict[str, str]], rules: list[Any], successes: int) -> list[str]:
+    work: list[tuple[int, str]] = []
+    for rule in rules:
+        if not isinstance(rule, dict) or rule.get("when") != "tool_calls":
+            continue
+        count = rule.get("count")
+        pattern = rule.get("label")
+        if type(count) is not int or count < 1 or not isinstance(pattern, str) or not pattern:
+            continue
+        work.append((count, pattern))
+    work.sort(key=lambda item: item[0])
+    assigned: dict[int, int] = {}
+    for count, pattern in work:
+        for index, step in enumerate(steps):
+            if index in assigned:
+                continue
+            if _label_matches(step["label"], pattern):
+                assigned[index] = count
+                break
+    statuses = ["pending"] * len(steps)
+    active_at: int | None = None
+    active_count: int | None = None
+    for index, count in assigned.items():
+        if successes >= count:
+            statuses[index] = "done"
+        elif active_count is None or count < active_count:
+            active_at = index
+            active_count = count
+    if active_at is not None:
+        statuses[active_at] = "active"
+    return statuses
+
+
+def _mark_conclusion(steps: list[dict[str, str]], statuses: list[str], rules: list[Any]) -> None:
+    for rule in rules:
+        if not isinstance(rule, dict) or rule.get("when") != "finalizing":
+            continue
+        pattern = rule.get("label")
+        if not isinstance(pattern, str) or not pattern:
+            continue
+        for index, step in enumerate(steps):
+            if _label_matches(step["label"], pattern) and statuses[index] != "done":
+                statuses[index] = "active"
+                break
+
+
+def apply_plan_progress(
+    steps: list[Any] | None,
+    events: list[Any] | None,
+    rules: list[Any] | None = None,
+) -> list[dict[str, str]]:
+    """用规则表和已有事件算出每步 pending|active|done|skipped。
+
+    不读工具名，也不改事件。取消时没做完的步骤改为 skipped。
+    """
+    table = PLAN_PROGRESS if rules is None else rules
+    if not isinstance(table, list):
+        table = []
+    clean = _clean_progress_steps(steps)
+    signals = _progress_signals(events)
+    if signals["outline_confirm"] and not signals["cancelled"] and _rule_when(table, "outline_confirm"):
+        statuses = ["pending"] * len(clean)
+    else:
+        statuses = _statuses_from_counts(clean, table, signals["successful_tool_calls"])
+        if signals["finalizing"]:
+            _mark_conclusion(clean, statuses, table)
+    if signals["cancelled"]:
+        statuses = ["done" if status == "done" else "skipped" for status in statuses]
+    return [
+        {"id": step["id"], "label": step["label"], "status": statuses[index]}
+        for index, step in enumerate(clean)
+    ]

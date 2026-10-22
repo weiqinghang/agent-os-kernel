@@ -1,6 +1,7 @@
 /**
  * App 侧进度文案。只读现有 run_events kind，不发明 phase_*，不把业务阶段机放进内核。
- * 映射结果只允许白名单短句；tool 名、mode、id、原始 JSON、CoT 一律不进入文案。
+ * 呼吸条只允许白名单短句；计划卡状态另用 Skill 的计数规则在本地算，呼吸条不读它。
+ * tool 名、mode、id、原始 JSON、CoT 一律不进入文案。
  */
 
 export const IMMEDIATE = "处理中";
@@ -40,7 +41,28 @@ function writingModelStep(p) {
   return false;
 }
 
-/** 计划卡用的中文短句。不进呼吸白名单，也不在这里改步骤状态。 */
+/**
+ * 与 insight_report.PLAN_PROGRESS 同一张表。只含计数和文案通配，没有工具名。
+ * v0 由页面计算；编排仍只发 revision 1、全部 pending。
+ */
+export const PLAN_PROGRESS = [
+  { when: "outline_confirm", status: "pending" },
+  { when: "tool_calls", count: 1, label: "*范围*" },
+  { when: "tool_calls", count: 2, label: "*类目*" },
+  { when: "tool_calls", count: 3, label: "*渠道*" },
+  { when: "tool_calls", count: 4, label: "*省*" },
+  { when: "tool_calls", count: 5, label: "*退货*" },
+  { when: "finalizing", label: "*结论*", status: "active" },
+];
+
+export const PLAN_STATUS_TEXT = {
+  pending: "未开始",
+  active: "进行中",
+  done: "完成",
+  skipped: "跳过",
+};
+
+/** 计划卡用的中文短句。不进呼吸白名单。 */
 const PLAN_LIMIT = 5;
 
 function isBusinessLabel(label) {
@@ -48,26 +70,167 @@ function isBusinessLabel(label) {
   return /^[\u4e00-\u9fff，。、]+$/.test(label);
 }
 
-/**
- * 只取 kind=plan 里能上屏的 label。状态保持未开始，不根据工具事件猜进度。
- * 返回 null 表示还没有可显示的步骤。
- */
-export function projectPlan(events) {
-  let labels = null;
-  for (const ev of events) {
+function labelMatches(label, pattern) {
+  if (typeof pattern !== "string" || pattern.length === 0) return false;
+  const parts = pattern.split("*").filter((part) => part.length > 0);
+  if (!parts.length) return false;
+  let pos = 0;
+  for (const part of parts) {
+    const found = label.indexOf(part, pos);
+    if (found < 0) return false;
+    pos = found + part.length;
+  }
+  return true;
+}
+
+function readSignals(events) {
+  let outline = false;
+  let seenOutline = false;
+  let successes = 0;
+  let finalizing = false;
+  let cancelled = false;
+  for (const ev of events || []) {
+    if (!ev || typeof ev !== "object") continue;
+    const kind = ev.kind;
+    const p = payloadOf(ev);
+    if (kind === "tool_call") {
+      if (p.ok === true) successes += 1;
+      continue;
+    }
+    if (kind === "hitl" && p.kind === "outline_confirm") {
+      if (p.auto === true || p.approved === true) {
+        outline = false;
+        seenOutline = false;
+      } else {
+        outline = true;
+        seenOutline = true;
+      }
+      continue;
+    }
+    if (kind === "state") {
+      const state = typeof p.state === "string" ? p.state : "";
+      const held = p.hitl_kind === "outline_confirm" || seenOutline;
+      if (state === "awaiting_hitl" && held) {
+        outline = true;
+        seenOutline = true;
+      } else if (seenOutline && state && state !== "awaiting_hitl") {
+        outline = false;
+      }
+      if (state === "failed") finalizing = false;
+      else if (state === "cancelled") cancelled = true;
+      else if (state === "completed" || state === "finalizing") finalizing = true;
+      continue;
+    }
+    if (kind === "model_step") {
+      if (writingModelStep(p)) finalizing = true;
+      continue;
+    }
+    if (kind === "assistant") finalizing = true;
+  }
+  return { outline, successes, finalizing, cancelled };
+}
+
+function hasWhen(rules, when) {
+  return (rules || []).some((rule) => rule && rule.when === when);
+}
+
+function statusesFromCounts(steps, rules, successes) {
+  const work = [];
+  for (const rule of rules || []) {
+    if (!rule || rule.when !== "tool_calls") continue;
+    const count = rule.count;
+    const pattern = rule.label;
+    if (typeof count !== "number" || count < 1 || typeof pattern !== "string" || !pattern) continue;
+    work.push({ count, pattern });
+  }
+  work.sort((a, b) => a.count - b.count);
+  const assigned = new Map();
+  for (const rule of work) {
+    for (let i = 0; i < steps.length; i++) {
+      if (assigned.has(i)) continue;
+      if (labelMatches(steps[i].label, rule.pattern)) {
+        assigned.set(i, rule.count);
+        break;
+      }
+    }
+  }
+  const statuses = steps.map(() => "pending");
+  let activeAt = -1;
+  let activeCount = Infinity;
+  for (const [index, count] of assigned) {
+    if (successes >= count) statuses[index] = "done";
+    else if (count < activeCount) {
+      activeAt = index;
+      activeCount = count;
+    }
+  }
+  if (activeAt >= 0) statuses[activeAt] = "active";
+  return statuses;
+}
+
+function markConclusion(steps, statuses, rules) {
+  for (const rule of rules || []) {
+    if (!rule || rule.when !== "finalizing") continue;
+    if (typeof rule.label !== "string" || !rule.label) continue;
+    for (let i = 0; i < steps.length; i++) {
+      if (labelMatches(steps[i].label, rule.label) && statuses[i] !== "done") {
+        statuses[i] = "active";
+        break;
+      }
+    }
+  }
+}
+
+/** 纯函数：步骤文案 + 已有事件 + 规则表 → 每步状态。不读工具名。 */
+export function applyPlanProgress(steps, events, rules) {
+  const table = rules || PLAN_PROGRESS;
+  const clean = [];
+  for (const step of steps || []) {
+    if (!step || typeof step !== "object" || Array.isArray(step)) continue;
+    const label = typeof step.label === "string" ? step.label.trim() : "";
+    if (!label) continue;
+    const id = typeof step.id === "string" ? step.id.trim() : "";
+    clean.push({ id, label });
+  }
+  const signals = readSignals(events);
+  let statuses;
+  if (signals.outline && !signals.cancelled && hasWhen(table, "outline_confirm")) {
+    statuses = clean.map(() => "pending");
+  } else {
+    statuses = statusesFromCounts(clean, table, signals.successes);
+    if (signals.finalizing) markConclusion(clean, statuses, table);
+  }
+  if (signals.cancelled) statuses = statuses.map((status) => (status === "done" ? "done" : "skipped"));
+  return clean.map((step, index) => ({ id: step.id, label: step.label, status: statuses[index] }));
+}
+
+function collectPlanSteps(events) {
+  let steps = null;
+  for (const ev of events || []) {
     if (!ev || ev.kind !== "plan") continue;
-    const steps = Array.isArray(payloadOf(ev).steps) ? payloadOf(ev).steps : [];
+    const raw = Array.isArray(payloadOf(ev).steps) ? payloadOf(ev).steps : [];
     const clean = [];
-    for (const step of steps) {
+    for (const step of raw) {
       if (!step || typeof step !== "object" || Array.isArray(step)) continue;
       const label = typeof step.label === "string" ? step.label.trim() : "";
       if (!label || !isBusinessLabel(label)) continue;
-      clean.push(label);
+      const id = typeof step.id === "string" ? step.id.trim() : "";
+      clean.push({ id, label });
       if (clean.length >= PLAN_LIMIT) break;
     }
-    if (clean.length) labels = clean;
+    if (clean.length) steps = clean;
   }
-  return labels;
+  return steps;
+}
+
+/**
+ * 取最后一条能上屏的 plan，再用规则表重算 status。
+ * 事件里自带的 status 不采用。返回 null 表示还没有可显示的步骤。
+ */
+export function projectPlan(events) {
+  const steps = collectPlanSteps(events);
+  if (!steps) return null;
+  return applyPlanProgress(steps, events, PLAN_PROGRESS);
 }
 
 /** 只看 kind 与少量中性字段。不读取 name/tool/mode/id/thinking。 */
