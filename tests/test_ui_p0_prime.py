@@ -9,6 +9,7 @@ from pytest_bdd import given, parsers, scenarios, then, when
 from agent_os_kernel.skills.insight_report import SKILL, stub_decide
 
 scenarios(str(Path(__file__).parent / "features" / "ui_p0_prime.feature"))
+scenarios(str(Path(__file__).parent / "features" / "midflight_progress.feature"))
 
 WHITELIST = {"处理中", "思考中", "正在查询数据", "正在整理结论", "等确认"}
 PROGRESS_SEQUENCE = ["处理中", "思考中", "正在查询数据", "正在整理结论"]
@@ -207,6 +208,61 @@ def debug_empty(world):
 @then(parsers.parse("页面出现「{text}」"))
 def body_contains(world, text):
     assert text in world["snap"]["body"]
+
+
+@when("服务接受回合并在后台继续")
+def accept_turn(world):
+    _call(world, {"op": "accept"})
+    assert world["snap"]["pending"] == 0
+
+
+@when("后台先出现思考事件")
+def push_think(world):
+    _call(world, {"op": "push", "kind": "think"})
+
+
+@when("后台再出现查数事件")
+def push_tool(world):
+    _call(world, {"op": "push", "kind": "tool"})
+
+
+@when("后台给出结论")
+def finish_success(world):
+    _call(world, {"op": "finish", "kind": "success"})
+
+
+@when("后台给出结论但没有查数事件")
+def finish_without_tool(world):
+    _call(world, {"op": "finish", "kind": "notool"})
+
+
+@when("服务接受回合但事件轮询失败")
+def accept_poll_fails(world):
+    _call(world, {"op": "accept", "runsFail": True})
+
+
+@when("服务接受回合并停在进行中")
+def accept_stuck(world):
+    _call(world, {"op": "accept", "pollBudgetMs": 0})
+
+
+@then("进度条带仍然是这一条")
+def still_same_strip(world):
+    snap = world["snap"]
+    assert snap["stripCount"] == 1
+    assert snap["stripsThisTurn"] == 1
+    assert snap["pending"] == 0
+
+
+@then("进度文案是「思考中」")
+def progress_thinking(world):
+    assert world["snap"]["progress"] == "思考中"
+    assert "正在查询数据" not in world["snap"]["updates"]
+
+
+@then("进度文案是「正在查询数据」")
+def progress_query(world):
+    assert world["snap"]["progress"] == "正在查询数据"
 
 
 @then("进度条带没有出现")

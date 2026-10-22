@@ -8,8 +8,8 @@ export const FAILURE_COPY = "这次没能完成，换个问法试试。";
 export const EMPTY_COPY = "（没有可展示的结论）";
 export const WHITELIST = [IMMEDIATE, "思考中", "正在查询数据", "正在整理结论", "等确认"];
 
-/** 测试可把 replayMs 调成 0；页面默认留一点间隔让同一条条带能被看见。 */
-export const settings = { replayMs: 40 };
+/** 测试可把 replayMs / pollMs 调小。页面轮询 events，不在内核里写进度文案。 */
+export const settings = { replayMs: 40, pollMs: 200, pollBudgetMs: 120000 };
 
 const RANK = {
   处理中: 0,

@@ -1,6 +1,6 @@
 /**
  * 洞察报告助理前台。进度与脱敏都在这一层：
- * 发令后立刻放一条呼吸条带，再用已发生的 run_events 原地改白名单文案。
+ * 发令后立刻放一条呼吸条带，再轮询 run_events，把白名单文案写回同一条。
  * 调试链路默认关；打开后也只显示白名单短句。
  */
 import {
@@ -174,16 +174,19 @@ export function boot(doc, win) {
   async function playEvents(strip, events) {
     const projected = project(events);
     const textEl = strip.querySelector(".progress-text");
-    for (let i = 0; i < projected.steps.length; i++) {
+    const from = strip.__played || 0;
+    for (let i = from; i < projected.steps.length; i++) {
       const text = projected.steps[i];
-      if (textEl.textContent !== text) {
+      const changed = textEl.textContent !== text;
+      if (changed) {
         textEl.textContent = text;
         strip.__updates.push(text);
       }
-      if (settings.replayMs > 0 && i < projected.steps.length - 1) {
+      if (changed && settings.replayMs > 0 && i < projected.steps.length - 1) {
         await new Promise((r) => setTimeout(r, settings.replayMs));
       }
     }
+    if (projected.steps.length > from) strip.__played = projected.steps.length;
     win.__lastProgressUpdates = strip.__updates.slice();
     noteStrips();
     return projected;
@@ -222,15 +225,98 @@ export function boot(doc, win) {
     parent.appendChild(details);
   }
 
-  async function fetchRunEvents(runId) {
-    if (!runId) return null;
+  function isTerminalStatus(status) {
+    return status === "completed" || status === "failed" || status === "awaiting_hitl";
+  }
+
+  async function fetchEventPage(runId, afterId) {
     try {
-      const r = await win.fetch("/runs/" + encodeURIComponent(runId));
+      const r = await win.fetch(
+        "/runs/" + encodeURIComponent(runId) + "/events?after_id=" + encodeURIComponent(afterId || 0)
+      );
       if (!r.ok) return null;
       return await r.json();
     } catch (_) {
       return null;
     }
+  }
+
+  function renderOutcome(view, events) {
+    clearProgress();
+    const status = view.status;
+    const markdown = view.markdown || view.message || view.text || "";
+    if (status === "failed") {
+      addMsg("assistant", visibleAssistant("failed", markdown));
+      return;
+    }
+    let msgEl;
+    if (status === "awaiting_hitl" && view.hitl) {
+      pendingHitl = { runId: view.run_id, token: view.hitl.resume_token };
+      const wrap = doc.createElement("div");
+      wrap.className = "hitl";
+      const ok = doc.createElement("button");
+      ok.type = "button";
+      ok.textContent = "确认大纲并继续";
+      ok.onclick = () => resumeHitl(true);
+      const no = doc.createElement("button");
+      no.type = "button";
+      no.textContent = "拒绝";
+      no.style.background = "#ef4444";
+      no.onclick = () => resumeHitl(false);
+      wrap.appendChild(ok);
+      wrap.appendChild(no);
+      msgEl = addMsg("assistant", markdown || "请确认后继续", wrap);
+    } else {
+      msgEl = addMsg("assistant", visibleAssistant(status, markdown));
+      if (status === "completed") hasConclusion = true;
+    }
+    if (view.context_bindings && view.context_bindings.time_window) {
+      currentTw = Object.assign({}, currentTw, view.context_bindings.time_window);
+    }
+    refreshMeta();
+    maybeAppendDebug(msgEl, events);
+  }
+
+  async function followTurn(strip, accepted) {
+    const view = {
+      run_id: accepted.run_id || "",
+      status: accepted.status || "",
+      markdown: accepted.markdown || accepted.message || accepted.text || "",
+      hitl: accepted.hitl || null,
+      context_bindings: accepted.context_bindings || null,
+    };
+    let after = 0;
+    let events = [];
+    let failedPoll = false;
+    const started = Date.now();
+    while (true) {
+      if (view.run_id && !failedPoll) {
+        const page = await fetchEventPage(view.run_id, after);
+        if (!page) {
+          failedPoll = true;
+        } else {
+          const fresh = Array.isArray(page.events) ? page.events : [];
+          if (fresh.length) {
+            events = events.concat(fresh);
+            const last = fresh[fresh.length - 1];
+            if (last && typeof last.id === "number") after = last.id;
+            await playEvents(strip, events);
+          }
+          if (page.state) view.status = page.state;
+          if (typeof page.result === "string") view.markdown = page.result;
+          if (page.hitl) view.hitl = page.hitl;
+          if (page.context_bindings) view.context_bindings = page.context_bindings;
+        }
+      }
+      if (failedPoll && !isTerminalStatus(view.status)) view.status = "failed";
+      if (isTerminalStatus(view.status) || failedPoll || !view.run_id) break;
+      if (Date.now() - started >= settings.pollBudgetMs) {
+        view.status = "failed";
+        break;
+      }
+      await new Promise((r) => setTimeout(r, settings.pollMs));
+    }
+    renderOutcome(view, events);
   }
 
   async function ensureSession() {
@@ -337,43 +423,6 @@ export function boot(doc, win) {
     }
   });
 
-  async function finishTurn(strip, j) {
-    const data = await fetchRunEvents(j.run_id || "");
-    const events = (data && data.events) || [];
-    await playEvents(strip, events);
-    clearProgress();
-    if (j.status === "failed") {
-      addMsg("assistant", visibleAssistant("failed", j.markdown || j.message || j.text || ""));
-      return;
-    }
-    let msgEl;
-    if (j.status === "awaiting_hitl" && j.hitl) {
-      pendingHitl = { runId: j.run_id, token: j.hitl.resume_token };
-      const wrap = doc.createElement("div");
-      wrap.className = "hitl";
-      const ok = doc.createElement("button");
-      ok.type = "button";
-      ok.textContent = "确认大纲并继续";
-      ok.onclick = () => resumeHitl(true);
-      const no = doc.createElement("button");
-      no.type = "button";
-      no.textContent = "拒绝";
-      no.style.background = "#ef4444";
-      no.onclick = () => resumeHitl(false);
-      wrap.appendChild(ok);
-      wrap.appendChild(no);
-      msgEl = addMsg("assistant", j.markdown || j.message || "请确认后继续", wrap);
-    } else {
-      msgEl = addMsg("assistant", visibleAssistant(j.status, j.markdown || j.text || ""));
-      if (j.status === "completed") hasConclusion = true;
-    }
-    if (j.context_bindings && j.context_bindings.time_window) {
-      currentTw = Object.assign({}, currentTw, j.context_bindings.time_window);
-    }
-    refreshMeta();
-    maybeAppendDebug(msgEl, events);
-  }
-
   async function submitText(text) {
     const value = String(text || "").trim();
     if (!value) return;
@@ -391,7 +440,7 @@ export function boot(doc, win) {
       });
       const j = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error("http");
-      await finishTurn(strip, j);
+      await followTurn(strip, j);
     } catch (_) {
       clearProgress();
       addMsg("assistant", visibleAssistant("failed", ""));
@@ -423,7 +472,7 @@ export function boot(doc, win) {
       const j = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error("resume");
       if (!j.run_id) j.run_id = runId;
-      await finishTurn(strip, j);
+      await followTurn(strip, j);
     } catch (_) {
       clearProgress();
       addMsg("assistant", visibleAssistant("failed", ""));
