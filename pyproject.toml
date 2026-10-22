@@ -30,4 +30,4 @@ dev = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-q --cov=agent_os_kernel.tool_gateway --cov=agent_os_kernel.policy --cov=agent_os_kernel.context --cov=agent_os_kernel.main --cov=agent_os_kernel.skills.insight_report --cov-report=term-missing --cov-fail-under=90"
+addopts = "-q --cov=agent_os_kernel.tool_gateway --cov=agent_os_kernel.policy --cov=agent_os_kernel.context --cov=agent_os_kernel.main --cov=agent_os_kernel.skills.insight_report --cov=agent_os_kernel.orchestrator --cov=agent_os_kernel.model_broker --cov-report=term-missing --cov-fail-under=90"

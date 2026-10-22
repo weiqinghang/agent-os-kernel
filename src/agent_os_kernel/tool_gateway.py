@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 import re
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import Any
@@ -379,6 +380,15 @@ class ToolGatewayError(Exception):
         self.status_code = status_code
 
 
+# First attempt plus one retry. Only timeout and 5xx; auth / 4xx are not retried.
+DAS_RETRY_BACKOFF_S = 0.2
+_DAS_ATTEMPTS = 2
+
+
+def _retryable_http_status(status_code: int) -> bool:
+    return 500 <= int(status_code) <= 599
+
+
 def use_fake_das() -> bool:
     return os.getenv("USE_FAKE_DAS", "").strip() == "1"
 
@@ -537,9 +547,27 @@ class ToolGateway:
             yield client
 
     def _post(self, payload: dict[str, Any]) -> dict[str, Any]:
-        with self._open() as client:
-            response = client.post(self.mcp_url(), json=payload, headers=self._headers())
-        return parse_mcp_response(response)
+        """POST once, and retry a single time on timeout or HTTP 5xx."""
+        headers = self._headers()
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                with self._open() as client:
+                    response = client.post(self.mcp_url(), json=payload, headers=headers)
+                return parse_mcp_response(response)
+            except ToolGatewayError as exc:
+                if attempt < _DAS_ATTEMPTS and _retryable_http_status(exc.status_code):
+                    time.sleep(DAS_RETRY_BACKOFF_S)
+                    continue
+                raise
+            except httpx.TimeoutException as exc:
+                if attempt < _DAS_ATTEMPTS:
+                    time.sleep(DAS_RETRY_BACKOFF_S)
+                    continue
+                raise ToolGatewayError(f"DAS timeout: {exc}", status_code=504) from exc
+            except httpx.TransportError as exc:
+                raise ToolGatewayError(f"DAS transport error: {exc}", status_code=502) from exc
 
     def _adapt(self, name: str, merged: dict[str, Any]) -> dict[str, Any]:
         """Fake DAS keeps name/start/end/metric. Real MCP gets the live schema."""

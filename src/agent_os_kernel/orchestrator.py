@@ -9,6 +9,52 @@ from .skills import registry
 from .tool_gateway import ToolGateway, ToolGatewayError
 
 MAX_STEPS = 8
+_ERROR_LIMIT = 180
+
+
+def _short_error(exc: BaseException, limit: int = _ERROR_LIMIT) -> str:
+    text = " ".join(str(exc).split())
+    if not text:
+        text = exc.__class__.__name__
+    if len(text) > limit:
+        return text[: limit - 1] + "…"
+    return text
+
+
+def _tool_failure(name: str, arguments: Any, exc: BaseException) -> dict[str, Any]:
+    args = arguments if isinstance(arguments, dict) else {}
+    return {
+        "name": name,
+        "arguments": args,
+        "ok": False,
+        "error": _short_error(exc),
+        "data": None,
+        "evidence": None,
+    }
+
+
+def _emit_tool_failure(
+    run_id: str,
+    name: str,
+    arguments: Any,
+    exc: BaseException,
+    bindings: dict[str, Any],
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {"tool": name, "ok": False, "error": _short_error(exc)}
+    if bindings:
+        payload["bindings_fingerprint"] = context.bindings_fingerprint(bindings)
+    obs.emit(run_id, "tool_call", payload)
+    return _tool_failure(name, arguments, exc)
+
+
+def _emit_broker_events(run_id: str, step: int, decision: dict[str, Any]) -> None:
+    events = decision.pop("_broker_events", None) or []
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        payload = {"step": step}
+        payload.update(event)
+        obs.emit(run_id, "model_step", payload)
 
 
 def handle_user_message(
@@ -72,8 +118,7 @@ def handle_user_message(
                 bindings=bindings,
                 skill_name=skill_name,
             )
-            if decision.pop("_live_fallback", None):
-                obs.emit(run_id, "model_step", {"step": step, "type": "live_fallback_stub", "mode": "stub"})
+            _emit_broker_events(run_id, step, decision)
             dtype = decision.get("type")
             obs.emit(
                 run_id,
@@ -88,24 +133,40 @@ def handle_user_message(
 
             if dtype == "tool_calls":
                 calls = decision.get("calls") or []
+                # Empty tool_calls has nothing to feed back, so the Run fails.
+                # A bad call or ToolGatewayError is recoverable: record ok:false and continue.
                 if not calls:
                     raise RuntimeError("model returned empty tool_calls")
                 for call in calls:
-                    name = call.get("name") or ""
-                    arguments = call.get("arguments") or {}
-                    if name not in allowed or not allow_tool(name):
-                        raise ToolGatewayError(f"tool not allowed by skill/policy: {name}")
-                    # Gateway merges bindings defaults; arguments win
-                    out = gw.call(name, arguments, bindings=bindings)
+                    if not isinstance(call, dict):
+                        err = ToolGatewayError("tool call must be an object")
+                        tool_results.append(_emit_tool_failure(run_id, "", {}, err, bindings))
+                        continue
+                    name = str(call.get("name") or "")
+                    raw_args = call.get("arguments")
+                    if raw_args is None:
+                        raw_args = {}
+                    try:
+                        if not isinstance(raw_args, dict):
+                            raise ToolGatewayError("tool arguments must be an object")
+                        if name not in allowed or not allow_tool(name):
+                            raise ToolGatewayError(f"tool not allowed by skill/policy: {name}")
+                        # Gateway merges bindings defaults; arguments win
+                        out = gw.call(name, raw_args, bindings=bindings)
+                    except ToolGatewayError as exc:
+                        tool_results.append(_emit_tool_failure(run_id, name, raw_args, exc, bindings))
+                        continue
                     summary = context.summarize_tool(
                         name, out.get("evidence"), out.get("data") or {}, bindings=bindings
                     )
+                    summary["ok"] = True
                     obs.emit(run_id, "tool_call", summary)
                     # Keep model/stub-requested args for plan matching; evidence has merged
                     tool_results.append(
                         {
                             "name": name,
-                            "arguments": arguments,
+                            "arguments": raw_args,
+                            "ok": True,
                             "data": out.get("data"),
                             "evidence": out.get("evidence"),
                         }
