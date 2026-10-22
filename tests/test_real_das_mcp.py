@@ -25,6 +25,8 @@ from agent_os_kernel.tool_gateway import (
     ToolGateway,
     ToolGatewayError,
     adapt_real_arguments,
+    clear_dataset_id_cache,
+    index_dataset_ids,
     parse_mcp_response,
     resolve_health_url,
     resolve_mcp_url,
@@ -35,12 +37,15 @@ ROOT = Path(__file__).resolve().parents[1]
 scenarios(str(Path(__file__).parent / "features" / "real_das_mcp.feature"))
 
 SEED = "ecommerce_sales_v2"
+BOX_UUID = "8c136287-aa85-5c34-831a-ddfc7983d1a4"
 
 
 class FakeMcp:
     def __init__(self) -> None:
         self.requests: list[httpx.Request] = []
         self.mode = "json"
+        self.list_rows: list[dict] | None = None
+        self.fail_list = False
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
@@ -69,7 +74,14 @@ class FakeMcp:
             params = body.get("params") or {}
             name = params.get("name")
             args = params.get("arguments") or {}
-            data = _tool_payload(name, args)
+            if name == "list_datasets" and self.fail_list:
+                payload = {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "error": {"code": -32603, "message": "catalog down"},
+                }
+                return httpx.Response(200, json=payload)
+            data = _tool_payload(name, args, self.list_rows)
             result: dict = {
                 "content": [{"type": "text", "text": json.dumps(data, ensure_ascii=False)}],
                 "structuredContent": data,
@@ -90,13 +102,34 @@ def _metric_name(args: dict) -> str | None:
     if isinstance(metric, str) and metric.strip():
         return metric.strip()
     metrics = args.get("metrics")
+    if isinstance(metrics, list):
+        for item in metrics:
+            if isinstance(item, str) and item.strip():
+                return item.strip()
+            if isinstance(item, dict):
+                alias = item.get("alias") or item.get("name")
+                if isinstance(alias, str) and alias.strip():
+                    return alias.strip()
+        return None
     if isinstance(metrics, dict):
         if isinstance(metrics.get("name"), str):
             return str(metrics["name"])
         for key, val in metrics.items():
             if isinstance(val, dict):
-                return str(val.get("name") or key)
+                return str(val.get("name") or val.get("alias") or key)
     return None
+
+
+def _group_key(args: dict):
+    group_by = args.get("group_by")
+    if isinstance(group_by, list):
+        if not group_by:
+            return None
+        first = group_by[0]
+        if isinstance(first, dict):
+            return first.get("field")
+        return first
+    return group_by
 
 
 def _eq_filters(args: dict) -> dict:
@@ -106,23 +139,25 @@ def _eq_filters(args: dict) -> dict:
     elif isinstance(filters, dict) and isinstance(filters.get("clauses"), list):
         clauses = filters["clauses"]
     elif isinstance(filters, dict):
-        return {k: v for k, v in filters.items() if k not in {"op", "clauses"}}
+        return {k: v for k, v in filters.items() if k not in {"op", "clauses", "operator"}}
     else:
         return {}
     flat: dict = {}
     for clause in clauses:
-        if isinstance(clause, dict) and clause.get("op") == "eq" and clause.get("field"):
+        if not isinstance(clause, dict) or not clause.get("field"):
+            continue
+        op = clause.get("operator") or clause.get("op")
+        if op == "eq":
             flat[clause["field"]] = clause.get("value")
     return flat
 
 
-def _tool_payload(name: str, args: dict) -> dict:
+def _tool_payload(name: str, args: dict, list_rows: list[dict] | None = None) -> dict:
     if name == "list_datasets":
-        return {
-            "datasets": [
-                {"id": SEED, "name": SEED, "description": "seed", "row_count": 200}
-            ]
-        }
+        rows = list_rows if list_rows is not None else [
+            {"id": SEED, "name": SEED, "description": "seed", "row_count": 200}
+        ]
+        return {"datasets": rows}
     if name == "describe_dataset":
         return {
             "name": args.get("dataset_id") or args.get("name") or SEED,
@@ -142,7 +177,7 @@ def _tool_payload(name: str, args: dict) -> dict:
             ("channel", "sum_gmv"): "抖音电商",
             ("province", "sum_gmv"): "江苏",
             ("channel", "return_rate"): "拼多多",
-        }.get((args.get("group_by"), _metric_name(args)), "其他")
+        }.get((_group_key(args), _metric_name(args)), "其他")
         return {
             "group_by": args.get("group_by"),
             "metric": args.get("metric"),
@@ -180,6 +215,7 @@ def _install(monkeypatch: pytest.MonkeyPatch, fake: FakeMcp) -> None:
 
 
 def _real_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> FakeMcp:
+    clear_dataset_id_cache()
     monkeypatch.delenv("USE_FAKE_DAS", raising=False)
     monkeypatch.setenv("DAS_MCP_URL", "http://das.test/api/mcp")
     monkeypatch.setenv("DAS_MCP_AUTH_TOKEN", "sekret")
@@ -244,10 +280,11 @@ def then_bearer(mcp_world):
     )
     args = stats_call["params"]["arguments"]
     assert args["dataset_id"] == SEED
-    assert args["group_by"] == "category"
+    assert args["group_by"] == ["category"]
     assert args["limit"] == 5
-    assert args["metrics"]["sum_gmv"]["field"] == "gmv"
-    assert {"field": "order_date", "op": "gte", "value": "2025-07-25"} in args["filters"]["clauses"]
+    assert args["metrics"] == [{"function": "sum", "field": "gmv", "alias": "sum_gmv"}]
+    assert {"field": "order_date", "operator": "gte", "value": "2025-07-25"} in args["filters"]
+    assert {"field": "order_date", "operator": "lte", "value": "2025-10-22"} in args["filters"]
     for leftover in ("name", "dataset", "start", "end", "metric"):
         assert leftover not in args
     assert "sql" not in args
@@ -320,7 +357,7 @@ def then_fake_keys_stripped(mcp_world):
             assert key not in args
 
 
-@then("query_stats 带上 dataset_id、时间窗 filters 与 metrics 对象")
+@then("query_stats 带上 dataset_id、时间窗 filters 数组、metrics 数组与 group_by 数组")
 def then_real_dsl(mcp_world):
     by_name = {
         b["params"]["name"]: b["params"]["arguments"]
@@ -329,28 +366,64 @@ def then_real_dsl(mcp_world):
     }
     stats = by_name["query_stats"]
     assert stats["dataset_id"] == SEED
-    assert stats["group_by"] == "channel"
+    assert stats["group_by"] == ["channel"]
     assert stats["limit"] == 10
-    assert stats["metrics"]["return_rate"] == {
-        "name": "return_rate",
-        "fn": "avg",
-        "field": "returned",
-    }
-    assert stats["filters"]["op"] == "and"
-    assert {"field": "order_date", "op": "gte", "value": "2025-07-25"} in stats["filters"]["clauses"]
-    assert {"field": "order_date", "op": "lte", "value": "2025-10-22"} in stats["filters"]["clauses"]
-    assert {"field": "channel", "op": "eq", "value": "抖音电商"} in stats["filters"]["clauses"]
+    assert stats["metrics"] == [
+        {"function": "avg", "field": "returned", "alias": "return_rate"}
+    ]
+    assert {"field": "order_date", "operator": "gte", "value": "2025-07-25"} in stats["filters"]
+    assert {"field": "order_date", "operator": "lte", "value": "2025-10-22"} in stats["filters"]
+    assert {"field": "channel", "operator": "eq", "value": "抖音电商"} in stats["filters"]
     assert by_name["describe_dataset"] == {"dataset_id": SEED}
     sample = by_name["sample_records"]
     assert sample["dataset_id"] == SEED
     assert sample["limit"] == 5
-    assert {"field": "category", "op": "eq", "value": "服装"} in sample["filters"]["clauses"]
-    assert {"field": "order_date", "op": "gte", "value": "2025-07-25"} in sample["filters"]["clauses"]
+    assert {"field": "category", "operator": "eq", "value": "服装"} in sample["filters"]
+    assert {"field": "order_date", "operator": "gte", "value": "2025-07-25"} in sample["filters"]
+    assert "offset" not in sample
     assert mcp_world["adapted_stats"]["data"]["rows"][0]["key"] == "拼多多"
+
+
+@given("目录把 ecommerce_sales_v2 映射到 UUID")
+def given_uuid_catalog(mcp_world):
+    mcp_world["dataset_uuid"] = BOX_UUID
+    mcp_world["fake"].list_rows = [{"dataset_id": BOX_UUID, "dataset_name": SEED}]
+
+
+@when("网关用友好名两次调用 query_stats 并用 UUID 再调用一次")
+def when_resolve_name(mcp_world):
+    gw = ToolGateway()
+    bindings = {"dataset": SEED, "time_window": {"start": "2025-07-25", "end": "2025-10-22"}}
+    for _ in range(2):
+        gw.call(
+            "query_stats",
+            {"group_by": "category", "metric": "sum_gmv", "limit": 1},
+            bindings=bindings,
+        )
+    gw.call(
+        "query_stats",
+        {"dataset_id": BOX_UUID, "group_by": "category", "metric": "count", "limit": 1},
+    )
+
+
+@then("只请求了一次 list_datasets 且 query_stats 的 dataset_id 都是该 UUID")
+def then_resolved_uuid(mcp_world):
+    calls = [b for b in _posted(mcp_world["fake"]) if b.get("method") == "tools/call"]
+    listed = [c for c in calls if c["params"]["name"] == "list_datasets"]
+    stats = [c for c in calls if c["params"]["name"] == "query_stats"]
+    assert len(listed) == 1
+    assert len(stats) == 3
+    assert all(c["params"]["arguments"]["dataset_id"] == BOX_UUID for c in stats)
+    first = stats[0]["params"]["arguments"]
+    assert first["metrics"][0]["function"] == "sum"
+    assert first["group_by"] == ["category"]
+    assert isinstance(first["filters"], list)
+    assert stats[2]["params"]["arguments"]["metrics"] == [{"function": "count", "alias": "count"}]
 
 
 @given("假 DAS 开关已打开", target_fixture="mcp_world")
 def given_fake_switch(monkeypatch):
+    clear_dataset_id_cache()
     monkeypatch.setenv("USE_FAKE_DAS", "1")
     monkeypatch.setenv("FAKE_DAS_URL", "http://127.0.0.1:8788")
     monkeypatch.delenv("DAS_MCP_URL", raising=False)
@@ -551,10 +624,13 @@ def test_fake_mode_uses_mcp_path_without_auth(monkeypatch):
         {"group_by": "province", "metric": "sum_gmv"},
         bindings={"dataset": SEED, "project_id": "box"},
     )
+    posted = _posted(fake)
+    assert len(posted) == 1
+    assert posted[0]["params"]["name"] == "query_stats"
     req = fake.requests[-1]
     assert req.url.path == "/mcp"
     assert "authorization" not in req.headers
-    args = json.loads(req.content.decode())["params"]["arguments"]
+    args = posted[0]["params"]["arguments"]
     assert "dataset_id" not in args
     assert args["name"] == SEED
     assert args["project_id"] == "box"
@@ -568,98 +644,178 @@ def test_adapt_real_argument_edges():
         "dataset": "also",
         "metric": "sum_gmv",
         "metrics": {"custom": {"fn": "sum", "field": "gmv"}},
-        "group_by": ["category"],
+        "group_by": [
+            "category",
+            {"field": "channel", "transform": "identity", "part": "day", "alias": "ch", "extra": 1},
+            "",
+            {"alias": "nope"},
+            "province",
+            "city",
+        ],
         "filters": {
             "op": "and",
             "clauses": [{"field": "order_date", "op": "ge", "value": "2025-01-01"}],
         },
         "time_window": {"start": "2025-07-25", "end": "2025-10-22"},
+        "sort": [{"field": "sum_gmv", "direction": "desc"}],
     }
     mixed = adapt_real_arguments("query_stats", original)
     assert original["name"] == "other"
     assert mixed["dataset_id"] == "explicit"
-    assert mixed["metrics"] == {"custom": {"fn": "sum", "field": "gmv"}}
-    assert mixed["group_by"] == ["category"]
-    assert {"field": "order_date", "op": "ge", "value": "2025-01-01"} in mixed["filters"]["clauses"]
-    assert {"field": "order_date", "op": "lte", "value": "2025-10-22"} in mixed["filters"]["clauses"]
-    assert not any(clause["op"] == "gte" for clause in mixed["filters"]["clauses"])
+    assert mixed["metrics"] == [{"function": "sum", "field": "gmv", "alias": "custom"}]
+    assert mixed["group_by"] == [
+        "category",
+        {"field": "channel", "transform": "identity", "part": "day", "alias": "ch"},
+        "province",
+    ]
+    assert {"field": "order_date", "operator": "gte", "value": "2025-01-01"} in mixed["filters"]
+    assert {"field": "order_date", "operator": "lte", "value": "2025-10-22"} in mixed["filters"]
+    assert not any(clause["operator"] == "ge" for clause in mixed["filters"])
     assert "metric" not in mixed
+    assert mixed["sort"][0]["direction"] == "desc"
     assert "limit" not in mixed
 
     listed = adapt_real_arguments(
         "list_datasets",
-        {"name": "nope", "metric": "sum_gmv", "ready_only": True, "start": "2025-01-01"},
+        {
+            "name": "nope",
+            "metric": "sum_gmv",
+            "ready_only": False,
+            "include_archived": False,
+            "query": "",
+            "start": "2025-01-01",
+        },
     )
-    assert listed == {"ready_only": True}
+    assert listed == {"ready_only": False, "include_archived": False}
 
     described = adapt_real_arguments(
         "describe_fields",
-        {"name": SEED, "start": "2025-07-25", "end": "2025-10-22", "metric": "sum_gmv"},
+        {
+            "name": SEED,
+            "start": "2025-07-25",
+            "end": "2025-10-22",
+            "metric": "sum_gmv",
+            "field_names": ["gmv"],
+        },
     )
-    assert described == {"dataset_id": SEED}
-    assert adapt_real_arguments("describe_tag_hierarchies", {}) == {}
-    assert adapt_real_arguments("describe_dataset", {"dataset": SEED}) == {"dataset_id": SEED}
+    assert described == {"dataset_id": SEED, "field_names": ["gmv"]}
+    assert adapt_real_arguments("describe_fields", {"dataset_id": SEED, "field_names": []}) == {
+        "dataset_id": SEED
+    }
+    assert adapt_real_arguments("describe_tag_hierarchies", {"tree_id": "cat", "limit": 4}) == {
+        "tree_id": "cat",
+        "limit": 4,
+    }
+    assert adapt_real_arguments("describe_dataset", {"dataset": SEED, "filters": {"a": 1}}) == {
+        "dataset_id": SEED
+    }
 
     window_only = adapt_real_arguments(
         "search_records",
         {
             "dataset": SEED,
             "time_window": {"end": "2025-10-22"},
-            "filters": [{"field": "sku", "op": "eq", "value": "耳机"}, "skip"],
+            "filters": [
+                {"field": "sku", "op": "eq", "value": "耳机"},
+                "skip",
+                {"field": "note", "operator": "text_match"},
+                {
+                    "field": "title",
+                    "operator": "text_match",
+                    "value": {"keywords": ["耳机"], "mode": "and"},
+                },
+                {"field": "gone", "operator": "is_null", "value": "x"},
+                {"field": "bad", "op": "neq", "value": 1},
+            ],
             "q": "",
             "keyword": "耳机",
             "query": "耳机",
             "offset": 2,
+            "return_fields": ["sku"],
+            "metric": "sum_gmv",
         },
     )
     assert window_only["dataset_id"] == SEED
-    assert window_only["keyword"] == "耳机"
-    assert window_only["query"] == "耳机"
-    assert window_only["offset"] == 2
-    assert "q" not in window_only
-    assert {"field": "order_date", "op": "lte", "value": "2025-10-22"} in window_only["filters"]["clauses"]
-    assert {"field": "sku", "op": "eq", "value": "耳机"} in window_only["filters"]["clauses"]
+    assert window_only["return_fields"] == ["sku"]
+    for banned in ("keyword", "query", "offset", "q", "metric", "metrics"):
+        assert banned not in window_only
+    assert {"field": "order_date", "operator": "lte", "value": "2025-10-22"} in window_only["filters"]
+    assert {"field": "sku", "operator": "eq", "value": "耳机"} in window_only["filters"]
+    assert {"field": "title", "operator": "text_match", "value": {"keywords": ["耳机"], "mode": "and"}} in window_only[
+        "filters"
+    ]
+    assert {"field": "gone", "operator": "is_null"} in window_only["filters"]
+    assert not any(clause["field"] == "bad" for clause in window_only["filters"])
 
     conditions = adapt_real_arguments(
         "sample_records",
         {
             "name": SEED,
             "offset": 0,
+            "sample_strategy": "first",
+            "include_long_text": False,
             "filters": {
-                "conditions": [{"field": "province", "op": "eq", "value": "江苏"}, None],
+                "conditions": [{"field": "province", "operator": "eq", "value": "江苏"}, None],
                 "logic": "and",
                 "channel": {"eq": "京东"},
             },
         },
     )
-    # conditions key wins over sibling flat keys
-    assert conditions["filters"]["clauses"] == [{"field": "province", "op": "eq", "value": "江苏"}]
-    assert conditions["offset"] == 0
+    assert conditions["filters"] == [{"field": "province", "operator": "eq", "value": "江苏"}]
+    assert conditions["sample_strategy"] == "first"
+    assert conditions["include_long_text"] is False
+    assert "offset" not in conditions
 
     ops = adapt_real_arguments(
         "query_stats",
         {
             "dataset_id": SEED,
             "metric": "  count  ",
-            "filters": {"gmv": {"gte": 10, "lte": 20}, "op": "and"},
+            "filters": {"gmv": {"gte": 10, "lte": 20}, "operator": "and"},
             "start": "2025-07-25",
+            "group_by": "  ",
         },
     )
-    assert ops["metrics"] == {"count": {"name": "count", "fn": "count"}}
-    fields = {(c["field"], c["op"]) for c in ops["filters"]["clauses"]}
+    assert ops["metrics"] == [{"function": "count", "alias": "count"}]
+    fields = {(c["field"], c["operator"]) for c in ops["filters"]}
     assert ("gmv", "gte") in fields and ("gmv", "lte") in fields
     assert ("order_date", "gte") in fields
     assert ("order_date", "lte") not in fields
+    assert "group_by" not in ops
 
-    assert adapt_real_arguments("query_stats", {"dataset_id": SEED, "metrics": ["sum_gmv"], "metric": "avg_gmv"})[
-        "metrics"
-    ] == ["sum_gmv"]
-    assert adapt_real_arguments("query_stats", {"dataset_id": SEED, "metric": {"fn": "sum", "field": "gmv"}})[
-        "metrics"
-    ] == {"fn": "sum", "field": "gmv"}
+    assert adapt_real_arguments(
+        "query_stats", {"dataset_id": SEED, "metrics": ["sum_gmv"], "metric": "avg_gmv"}
+    )["metrics"] == [{"function": "sum", "field": "gmv", "alias": "sum_gmv"}]
+    assert adapt_real_arguments(
+        "query_stats", {"dataset_id": SEED, "metric": {"fn": "sum", "field": "gmv"}}
+    )["metrics"] == [{"function": "sum", "field": "gmv"}]
+    assert adapt_real_arguments(
+        "query_stats", {"dataset_id": SEED, "metrics": {"function": "min", "alias": "min"}}
+    )["metrics"] == [{"function": "min"}]
+    assert adapt_real_arguments(
+        "query_stats", {"dataset_id": SEED, "metric": "count_distinct_buyer"}
+    )["metrics"] == [{"function": "count_distinct", "field": "buyer", "alias": "count_distinct_buyer"}]
+    assert adapt_real_arguments("query_stats", {"dataset_id": SEED, "metric": "min"})["metrics"] == [
+        {"function": "min", "alias": "min"}
+    ]
+    assert "filters" not in adapt_real_arguments(
+        "search_records",
+        {"dataset_id": SEED, "filters": [{"field": "sku", "op": "", "value": "x"}]},
+    )
+    assert adapt_real_arguments(
+        "query_stats", {"dataset_id": SEED, "metrics": {"sum_qty": "sum_qty", "skip": 1}}
+    )["metrics"] == [{"function": "sum", "field": "qty", "alias": "sum_qty"}]
+    assert adapt_real_arguments(
+        "query_stats", {"dataset_id": SEED, "metrics": {"function": "nope", "alias": "avg_gmv"}}
+    )["metrics"] == [{"function": "avg", "field": "gmv", "alias": "avg_gmv"}]
+    assert "metrics" not in adapt_real_arguments(
+        "query_stats", {"dataset_id": SEED, "metrics": [{"function": "nope"}, 3]}
+    )
     unknown = adapt_real_arguments("query_stats", {"dataset_id": SEED, "metric": "custom_metric"})
-    assert unknown["metrics"] == {"custom_metric": {"name": "custom_metric"}}
-    assert "filters" not in adapt_real_arguments("query_stats", {"dataset_id": SEED, "metric": "  ", "filters": "nope"})
+    assert "metrics" not in unknown
+    assert "filters" not in adapt_real_arguments(
+        "query_stats", {"dataset_id": SEED, "metric": "  ", "filters": "nope", "group_by": 4}
+    )
     assert "metrics" not in adapt_real_arguments("query_stats", {"dataset_id": SEED, "metric": None})
     kept = adapt_real_arguments(
         "query_stats",
@@ -670,9 +826,66 @@ def test_adapt_real_argument_edges():
             "metric": "sum_qty",
         },
     )
-    assert kept["metrics"]["sum_qty"] == {"name": "sum_qty", "fn": "sum", "field": "qty"}
-    assert kept["filters"]["clauses"] == [{"field": "order_date", "op": "le", "value": "2025-10-22"}]
+    assert kept["metrics"] == [{"function": "sum", "field": "qty", "alias": "sum_qty"}]
+    assert kept["filters"] == [{"field": "order_date", "operator": "lte", "value": "2025-10-22"}]
     assert "group_by" not in kept
+    assert adapt_real_arguments(
+        "query_stats",
+        {"dataset_id": SEED, "metrics": {"name": "count", "field": "gmv"}},
+    )["metrics"] == [{"function": "count", "alias": "count"}]
+    assert adapt_real_arguments(
+        "query_stats",
+        {"dataset_id": SEED, "metrics": {"function": "count", "alias": "count", "field": "gmv"}},
+    )["metrics"] == [{"function": "count", "alias": "count"}]
+    assert adapt_real_arguments(
+        "query_stats",
+        {"dataset_id": SEED, "metrics": {"function": "sum", "field": 1, "alias": "sum"}},
+    )["metrics"] == [{"function": "sum"}]
+
+
+def test_dataset_catalog_resolution(monkeypatch, tmp_path):
+    indexed = index_dataset_ids(
+        {
+            "items": [
+                "skip",
+                {"dataset_name": "solo"},
+                {"dataset_id": BOX_UUID, "dataset_name": SEED, "name": "alias", "dataset": "also"},
+            ]
+        }
+    )
+    assert indexed[SEED] == BOX_UUID
+    assert indexed["alias"] == BOX_UUID
+    assert indexed["also"] == BOX_UUID
+    assert "solo" not in indexed
+    assert index_dataset_ids({"datasets": []}) == {}
+
+    fake = _real_env(monkeypatch, tmp_path)
+    gw = ToolGateway()
+    gw.call("describe_dataset", {"dataset_id": BOX_UUID})
+    assert [b["params"]["name"] for b in _posted(fake) if b["method"] == "tools/call"] == ["describe_dataset"]
+
+    clear_dataset_id_cache()
+    fake.requests.clear()
+    fake.fail_list = True
+    failed = gw.call("query_stats", {"dataset": SEED, "metric": "sum_gmv", "group_by": "category"})
+    again = gw.call("query_stats", {"name": "missing-dataset", "metric": "count"})
+    calls = [b for b in _posted(fake) if b["method"] == "tools/call"]
+    assert [c["params"]["name"] for c in calls].count("list_datasets") == 1
+    assert calls[1]["params"]["arguments"]["dataset_id"] == SEED
+    assert calls[2]["params"]["arguments"]["dataset_id"] == "missing-dataset"
+    assert failed["data"]["rows"][0]["key"] == "电子产品"
+    assert again["data"]["rows"]
+
+    clear_dataset_id_cache()
+    fake.requests.clear()
+    fake.fail_list = False
+    fake.list_rows = [{"id": SEED, "name": SEED}]
+    same = gw.call("describe_dataset", {"name": SEED})
+    assert same["data"]["name"] == SEED
+    described = next(
+        b for b in _posted(fake) if b["method"] == "tools/call" and b["params"]["name"] == "describe_dataset"
+    )
+    assert described["params"]["arguments"]["dataset_id"] == SEED
 
 
 def test_url_resolution_and_probe(monkeypatch):
