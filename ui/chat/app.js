@@ -8,6 +8,7 @@ import {
   debugLines,
   presentAssistant,
   project,
+  projectPlan,
   rebindLine,
   settings,
   visibleAssistant,
@@ -174,7 +175,41 @@ export function boot(doc, win) {
     if (old) old.remove();
   }
 
+  function paintPlan(events) {
+    const labels = projectPlan(events);
+    if (!labels) return;
+    let card = doc.querySelector(".plan-card.is-current");
+    if (!card) {
+      card = doc.createElement("details");
+      card.className = "plan-card is-current";
+      card.open = true;
+      const summary = doc.createElement("summary");
+      summary.textContent = "报告大纲";
+      card.appendChild(summary);
+      const list = doc.createElement("ol");
+      list.className = "plan-steps";
+      card.appendChild(list);
+      const strip = doc.querySelector(".progress-strip");
+      if (strip) msgs.insertBefore(card, strip);
+      else msgs.appendChild(card);
+    }
+    const list = card.querySelector(".plan-steps");
+    list.replaceChildren();
+    labels.forEach((label) => {
+      const li = doc.createElement("li");
+      li.textContent = label;
+      list.appendChild(li);
+    });
+    msgs.scrollTop = msgs.scrollHeight;
+  }
+
+  function settlePlan() {
+    const card = doc.querySelector(".plan-card.is-current");
+    if (card) card.classList.remove("is-current");
+  }
+
   async function playEvents(strip, events) {
+    paintPlan(events);
     const projected = project(events);
     const textEl = strip.querySelector(".progress-text");
     const from = strip.__played || 0;
@@ -303,6 +338,7 @@ export function boot(doc, win) {
   }
 
   function renderOutcome(view, events) {
+    settlePlan();
     clearProgress();
     const status = view.status;
     const markdown = view.markdown || view.message || view.text || "";

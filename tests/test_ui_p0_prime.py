@@ -11,8 +11,16 @@ from agent_os_kernel.skills.insight_report import SKILL, stub_decide
 scenarios(str(Path(__file__).parent / "features" / "ui_p0_prime.feature"))
 scenarios(str(Path(__file__).parent / "features" / "midflight_progress.feature"))
 scenarios(str(Path(__file__).parent / "features" / "cancel_progress.feature"))
+scenarios(str(Path(__file__).parent / "features" / "insight_plan_card.feature"))
 
 WHITELIST = {"处理中", "思考中", "正在查询数据", "正在整理结论", "等确认"}
+PLAN_LABELS = [
+    "确认这次要看的范围",
+    "看清类目卖得怎么样",
+    "看清渠道结构",
+    "看清各省贡献",
+    "看清退货风险",
+]
 PROGRESS_SEQUENCE = ["处理中", "思考中", "正在查询数据", "正在整理结论"]
 
 
@@ -259,6 +267,12 @@ def push_tool(world):
     _call(world, {"op": "push", "kind": "tool"})
 
 
+@when("后台出现计划事件")
+@when("后台又出现一次计划事件")
+def push_plan(world):
+    _call(world, {"op": "push", "kind": "plan"})
+
+
 @when("后台给出结论")
 def finish_success(world):
     _call(world, {"op": "finish", "kind": "success"})
@@ -302,6 +316,32 @@ def progress_query(world):
 def progress_writing(world):
     assert world["snap"]["progress"] == "正在整理结论"
     assert world["snap"]["updates"][-1] == "正在整理结论"
+
+
+@then("计划卡列出中文步骤")
+@then("计划卡仍然列出中文步骤")
+def plan_card_labels(world):
+    snap = world["snap"]
+    assert snap["planTag"] == "DETAILS"
+    assert snap["planLabels"] == PLAN_LABELS
+    assert snap["planSummary"] == ["报告大纲"] * snap["planCount"]
+    assert all(snap["planOpen"])
+    for label in PLAN_LABELS:
+        assert label in snap["body"]
+    assert "多出来的收尾" not in snap["body"]
+
+
+@then("计划卡仍然只有一张")
+def one_plan_card(world):
+    assert world["snap"]["planCount"] == 1
+
+
+@then("进度文案仍在白名单内")
+def progress_stays_whitelisted(world):
+    snap = world["snap"]
+    assert snap["progress"] in WHITELIST
+    assert all(item in WHITELIST for item in snap["updates"])
+    assert all(label not in WHITELIST for label in snap["planLabels"])
 
 
 @then("进度条带没有出现")

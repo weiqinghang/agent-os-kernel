@@ -30,6 +30,13 @@
     button { background:var(--accent); color:#fff; border:0; padding:10px 18px; border-radius:8px; cursor:pointer; font-weight:600; }
     button.stop { background:#3f1d24; color:#fecaca; }
     button:disabled { opacity:0.5; cursor:not-allowed; }
+    .plan-card { align-self:flex-start; max-width:860px; background:var(--bot); border:1px solid #2a3548; border-radius:10px; padding:8px 12px 10px; font-size:13px; white-space:normal; }
+    .plan-card summary { cursor:pointer; font-weight:600; list-style:none; }
+    .plan-card summary::-webkit-details-marker { display:none; }
+    .plan-card summary::before { content:"▸ "; color:var(--accent); }
+    .plan-card[open] summary::before { content:"▾ "; }
+    .plan-steps { margin:8px 0 0; padding-left:1.2em; }
+    .plan-steps li { margin:2px 0; }
     .progress-strip { align-self:flex-start; display:flex; align-items:center; gap:10px; padding:10px 14px; border-radius:999px; background:var(--bot); border:1px solid #2a3548; max-width:860px; }
     .progress-breathe { width:8px; height:8px; border-radius:50%; background:#93c5fd; animation:breathe 1.2s ease-in-out infinite; }
     .progress-text { font-size:14px; }

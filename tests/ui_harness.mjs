@@ -157,8 +157,62 @@ function jsonResponse(body, status = 200) {
   };
 }
 
+const PLAN_LABELS = [
+  "确认这次要看的范围",
+  "看清类目卖得怎么样",
+  "看清渠道结构",
+  "看清各省贡献",
+  "看清退货风险",
+];
+
+function planFixtureEvents() {
+  const good = PLAN_LABELS.map((label, index) => ({
+    id: "s" + index,
+    label,
+    status: "pending",
+  }));
+  return [
+    { kind: "plan", payload: "query_stats" },
+    { kind: "plan", payload: { steps: "query_stats", mode: "stub", run_id: RUN_ID } },
+    {
+      kind: "plan",
+      payload: {
+        steps: [{ label: "query_stats" }, { label: "deadbeef" }],
+        thinking: "hidden-cot",
+        fingerprint: "deadbeef",
+      },
+    },
+    {
+      kind: "plan",
+      payload: {
+        revision: 1,
+        mode: "live",
+        run_id: RUN_ID,
+        dataset: "ecommerce_sales",
+        fingerprint: "deadbeef",
+        thinking: "chain-of-thought",
+        steps: [
+          null,
+          "sample_records",
+          ["search_records"],
+          { label: "" },
+          { label: "   " },
+          { label: 3 },
+          { id: "tool", label: "describe_dataset", status: "done" },
+          { id: "json", label: '{"a":1}', status: "pending" },
+          { id: "long", label: "范围".repeat(30), status: "pending" },
+          ...good,
+          { id: "sixth", label: "多出来的收尾", status: "pending" },
+        ],
+      },
+    },
+    { kind: "plan", payload: { steps: [{ label: "list_datasets" }], mode: "stub" } },
+  ];
+}
+
 function realisticEvents() {
   return [
+    ...planFixtureEvents(),
     {
       kind: "run_created",
       payload: {
@@ -211,6 +265,7 @@ function realisticEvents() {
 
 function hitlEvents() {
   return [
+    ...planFixtureEvents(),
     { kind: "state", payload: { state: "acting" } },
     { kind: "state", payload: { state: "awaiting_hitl", hitl_kind: "outline_confirm" } },
     { kind: "hitl", payload: { kind: "outline_confirm", auto: false, resume_token: TOKEN } },
@@ -474,6 +529,11 @@ function snapshot() {
     maxConcurrentStrips: win.__maxConcurrentStrips || 0,
     imgCount: doc.querySelectorAll("img").length,
     leaks: findLeaks(visibleBlob(doc)),
+    planCount: doc.querySelectorAll(".plan-card").length,
+    planLabels: Array.from(doc.querySelectorAll(".plan-card li")).map((li) => textOf(li)),
+    planOpen: Array.from(doc.querySelectorAll(".plan-card")).map((card) => !!card.open),
+    planSummary: Array.from(doc.querySelectorAll(".plan-card summary")).map((el) => textOf(el)),
+    planTag: (doc.querySelector(".plan-card") || {}).tagName || "",
     placeholder: (doc.getElementById("inp") && doc.getElementById("inp").placeholder) || "",
     userTexts: Array.from(doc.querySelectorAll(".msg.user .body")).map((el) => el.textContent || ""),
   };
@@ -605,6 +665,13 @@ function progressExpect(kind) {
 
 async function doPush(msg) {
   const win = current.win;
+  if (msg.kind === "plan") {
+    const polls = win.__polls || 0;
+    win.__events = (win.__events || []).concat(stamp(win, planFixtureEvents()));
+    await waitUntil(() => (win.__polls || 0) > polls, 800);
+    await waitUntil(() => current.doc.querySelectorAll(".plan-card li").length >= 5, 800);
+    return snapshot();
+  }
   const before = win.__polls || 0;
   const expect = progressExpect(msg.kind);
   win.__events = (win.__events || []).concat(stamp(win, pushEvents(msg.kind)));
