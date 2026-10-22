@@ -24,6 +24,7 @@ from agent_os_kernel.tool_gateway import (
     WHITELIST,
     ToolGateway,
     ToolGatewayError,
+    DOGFOOD_RETURN_FIELDS,
     adapt_real_arguments,
     clear_dataset_id_cache,
     index_dataset_ids,
@@ -381,7 +382,93 @@ def then_real_dsl(mcp_world):
     assert {"field": "category", "operator": "eq", "value": "服装"} in sample["filters"]
     assert {"field": "order_date", "operator": "gte", "value": "2025-07-25"} in sample["filters"]
     assert "offset" not in sample
+    assert sample["return_fields"] == list(DOGFOOD_RETURN_FIELDS)
+    assert "evidence_preset" not in sample
     assert mcp_world["adapted_stats"]["data"]["rows"][0]["key"] == "拼多多"
+
+
+@when("网关调用 sample_records 与 search_records 的返回字段组合")
+def when_record_projection(mcp_world):
+    gw = ToolGateway()
+    bindings = {"dataset": SEED}
+    gw.call("sample_records", {"limit": 5}, bindings=bindings)
+    gw.call("search_records", {"return_fields": [], "limit": 3}, bindings=bindings)
+    gw.call(
+        "sample_records",
+        {"return_fields": [], "evidence_preset": "default", "limit": 2},
+        bindings=bindings,
+    )
+    gw.call(
+        "search_records",
+        {"return_fields": [" sku ", "", "gmv", 1]},
+        bindings=bindings,
+    )
+    gw.call(
+        "sample_records",
+        {"return_fields": ["order_id"], "evidence_preset": "default"},
+        bindings=bindings,
+    )
+    gw.call("search_records", {"evidence_preset": "custom"}, bindings=bindings)
+
+
+@then("缺省 return_fields 被补成狗粮字段且显式投影被保留")
+def then_record_projection(mcp_world):
+    calls = [
+        b["params"]
+        for b in _posted(mcp_world["fake"])
+        if b.get("method") == "tools/call" and b["params"]["name"] in ("sample_records", "search_records")
+    ]
+    assert len(calls) == 6
+    bare, empty, preset, cleaned, both, invalid = (c["arguments"] for c in calls)
+    assert [c["name"] for c in calls] == [
+        "sample_records",
+        "search_records",
+        "sample_records",
+        "search_records",
+        "sample_records",
+        "search_records",
+    ]
+    assert bare["return_fields"] == list(DOGFOOD_RETURN_FIELDS)
+    assert bare["dataset_id"] == SEED
+    assert bare["limit"] == 5
+    assert "evidence_preset" not in bare
+    assert empty["return_fields"] == list(DOGFOOD_RETURN_FIELDS)
+    assert preset == {
+        "dataset_id": SEED,
+        "evidence_preset": "default",
+        "limit": 2,
+    }
+    assert cleaned["return_fields"] == ["sku", "gmv"]
+    assert "evidence_preset" not in cleaned
+    assert both["return_fields"] == ["order_id"]
+    assert both["evidence_preset"] == "default"
+    assert invalid["return_fields"] == list(DOGFOOD_RETURN_FIELDS)
+    assert "evidence_preset" not in invalid
+    for args in (bare, empty, preset, cleaned, both, invalid):
+        for key in ("name", "dataset", "start", "end", "metric", "q", "keyword", "offset"):
+            assert key not in args
+
+
+@when("网关用假形状调用 sample_records")
+def when_fake_sample(mcp_world):
+    ToolGateway().call(
+        "sample_records",
+        {"limit": 5, "filters": {"category": "服装"}},
+        bindings={"dataset": SEED, "time_window": {"start": "2025-07-25", "end": "2025-10-22"}},
+    )
+
+
+@then("假 sample_records 保留 name 且没有 return_fields")
+def then_fake_sample_unchanged(mcp_world):
+    args = _posted(mcp_world["fake"])[-1]["params"]["arguments"]
+    assert args["name"] == SEED
+    assert args["start"] == "2025-07-25"
+    assert args["end"] == "2025-10-22"
+    assert args["limit"] == 5
+    assert args["filters"]["category"] == "服装"
+    assert "return_fields" not in args
+    assert "evidence_preset" not in args
+    assert "dataset_id" not in args
 
 
 @given("目录把 ecommerce_sales_v2 映射到 UUID")
@@ -764,7 +851,13 @@ def test_adapt_real_argument_edges():
     assert conditions["filters"] == [{"field": "province", "operator": "eq", "value": "江苏"}]
     assert conditions["sample_strategy"] == "first"
     assert conditions["include_long_text"] is False
+    assert conditions["return_fields"] == list(DOGFOOD_RETURN_FIELDS)
     assert "offset" not in conditions
+    assert adapt_real_arguments(
+        "search_records",
+        {"dataset_id": SEED, "return_fields": "order_id", "evidence_preset": "default"},
+    ) == {"dataset_id": SEED, "evidence_preset": "default"}
+    assert "return_fields" not in adapt_real_arguments("query_stats", {"dataset_id": SEED, "metric": "count"})
 
     ops = adapt_real_arguments(
         "query_stats",

@@ -87,8 +87,11 @@ export APP_RUNTIME_ENV_FILE="$PWD/.env"
   | `return_rate` | `{function: "avg", field: "returned", alias: "return_rate"}` |
   | `group_by` string | `[group_by]`; a list is kept and truncated to 3 |
   | `name`, `dataset`, `start`, `end`, `time_window`, string `metric` | stripped |
+  | `sample_records` / `search_records` with no `return_fields` and no `evidence_preset` | `return_fields`: `order_id`, `sku`, `category`, `channel`, `province`, `order_date`, `qty`, `gmv`, `returned` |
+  | `evidence_preset: "default"` | kept; published default evidence fields are used, and the dogfood list is not injected |
+  | non-empty `return_fields` | kept (blank items dropped) |
 
-  `filters` / `metrics` / `group_by` are arrays. They are not `{op, clauses}` objects and not a dict keyed by metric id. `query_stats`, `search_records`, and `sample_records` take the filters array. Only `query_stats` takes `metrics` and `group_by`. `describe_dataset` takes `dataset_id` only. Keys outside the live tool schema are not forwarded.
+  `filters` / `metrics` / `group_by` are arrays. They are not `{op, clauses}` objects and not a dict keyed by metric id. `query_stats`, `search_records`, and `sample_records` take the filters array. Only `query_stats` takes `metrics` and `group_by`. `describe_dataset` takes `dataset_id` only. Keys outside the live tool schema are not forwarded. Live `sample_records` / `search_records` reject a missing or empty `return_fields` (`return_fields_required`) unless `evidence_preset` is `"default"` and the dataset published `default_evidence_fields`. An empty list is also rejected (`minItems: 1`).
 
 Whitelist (on-box `tools/list` exposes the two describe tools, so they are allow-listed):
 
@@ -117,6 +120,7 @@ curl -s http://127.0.0.1:8788/health
 - After profile → patch field mappings with `permissions` + `index_strategy=btree` → confirm → `ddl-plan` → `publish` → **`POST /datasets/{id}/indexes`**.
 - Without indexes, `query_readiness.ready=false` and `ready_only=true` hides the dataset; `group_by` / metrics fail.
 - Dogfood seed: `ecommerce_sales_v2`.
+- `order_date` must be published as `data_type=date` so `gte` / `lte` filters validate. A text-typed duplicate of the same column fails those operators. The box seed script lives in the dataset-analysis-service tree (patched there); `scripts/seed_ecommerce.py` in this repo only fills the SQLite fake DAS and stores ISO date strings.
 
 ## Blockers / later
 

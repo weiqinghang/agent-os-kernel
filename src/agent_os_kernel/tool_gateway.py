@@ -45,7 +45,21 @@ _DATASET_SCOPED = frozenset(
 # Fake-DAS argument names. Real MCP schemas set additionalProperties: false.
 _FAKE_ARG_KEYS = frozenset({"name", "dataset", "start", "end", "time_window", "metric"})
 _FILTER_TOOLS = frozenset({"query_stats", "search_records", "sample_records"})
+_RECORD_TOOLS = frozenset({"search_records", "sample_records"})
 _DATE_FIELD = "order_date"
+# Ecommerce insight columns. Live sample/search reject a missing or empty
+# return_fields unless evidence_preset "default" can use published defaults.
+DOGFOOD_RETURN_FIELDS = (
+    "order_id",
+    "sku",
+    "category",
+    "channel",
+    "province",
+    "order_date",
+    "qty",
+    "gmv",
+    "returned",
+)
 _UUID_RE = re.compile(
     r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
 )
@@ -247,6 +261,31 @@ def _group_by_array(value: Any) -> list[Any] | None:
     return out[:3] or None
 
 
+def _clean_return_fields(value: Any) -> list[str] | None:
+    if not isinstance(value, list):
+        return None
+    fields = [item.strip() for item in value if isinstance(item, str) and item.strip()]
+    return fields or None
+
+
+def _apply_record_projection(out: dict[str, Any], merged: dict[str, Any]) -> None:
+    """sample/search require a non-empty return_fields or evidence_preset default.
+
+    An explicit field list is kept. ``evidence_preset: "default"`` is kept and
+    uses the dataset's published evidence fields. When both are missing, inject
+    the ecommerce dogfood columns so the call is not rejected as
+    ``return_fields_required``.
+    """
+    fields = _clean_return_fields(merged.get("return_fields"))
+    preset = merged.get("evidence_preset")
+    if fields:
+        out["return_fields"] = fields
+    if preset == "default":
+        out["evidence_preset"] = "default"
+    if "return_fields" not in out and "evidence_preset" not in out:
+        out["return_fields"] = list(DOGFOOD_RETURN_FIELDS)
+
+
 def _copy_present(out: dict[str, Any], merged: dict[str, Any], keys: tuple[str, ...]) -> None:
     for key in keys:
         value = merged.get(key)
@@ -259,7 +298,9 @@ def adapt_real_arguments(name: str, merged: dict[str, Any]) -> dict[str, Any]:
     """Normalize fake-DAS / mixed args onto the live MCP schemas.
 
     ``filters`` is an array of ``{field, operator, value?}``. ``metrics`` is an
-    array of ``{function, field?, alias?}``. ``group_by`` is an array. Fake keys
+    array of ``{function, field?, alias?}``. ``group_by`` is an array.
+    ``sample_records`` / ``search_records`` get the ecommerce ``return_fields``
+    list when that list and ``evidence_preset`` are both missing. Fake keys
     ``name`` / ``dataset`` / ``start`` / ``end`` / ``time_window`` / string
     ``metric`` are dropped. A non-UUID ``dataset_id`` is resolved later by the
     gateway. ``USE_FAKE_DAS`` does not call this function.
@@ -281,33 +322,17 @@ def adapt_real_arguments(name: str, merged: dict[str, Any]) -> dict[str, Any]:
         if group_by:
             out["group_by"] = group_by
         _copy_present(out, merged, ("limit", "sort"))
-    elif name == "search_records":
-        _copy_present(
-            out,
-            merged,
-            (
-                "limit",
-                "sort",
-                "return_fields",
-                "evidence_preset",
-                "max_chars_per_field",
-                "include_long_text",
-            ),
+    elif name in _RECORD_TOOLS:
+        _apply_record_projection(out, merged)
+        copied = (
+            "limit",
+            "sort",
+            "max_chars_per_field",
+            "include_long_text",
         )
-    elif name == "sample_records":
-        _copy_present(
-            out,
-            merged,
-            (
-                "limit",
-                "sort",
-                "return_fields",
-                "evidence_preset",
-                "max_chars_per_field",
-                "include_long_text",
-                "sample_strategy",
-            ),
-        )
+        if name == "sample_records":
+            copied = (*copied, "sample_strategy")
+        _copy_present(out, merged, copied)
     elif name == "describe_fields":
         _copy_present(out, merged, ("field_names",))
     elif name == "describe_tag_hierarchies":
