@@ -169,7 +169,9 @@ def compose_system(manifest_prompt: str, bindings: dict[str, Any]) -> str:
         (manifest_prompt or "").rstrip()
         + "\n\n# Context bindings\n"
         + block
-        + "\n\nWhen tool arguments omit dataset/time_window, use the bindings above."
+        + "\n\nWhen tool arguments omit dataset or time_window, use the bindings above."
+        + " Real DAS calls use dataset_id plus filters/metrics objects;"
+        + " the gateway rewrites leftover name/dataset/start/end/metric keys."
     )
 
 

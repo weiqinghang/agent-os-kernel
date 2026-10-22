@@ -15,7 +15,10 @@ SKILL: dict[str, Any] = {
         "每条发现必须带 evidence 指纹；禁止臆造数字或绕过工具网关。"
         "需要数据时先发 tool_calls（list_datasets / describe_dataset / query_stats / "
         "sample_records / search_records），证据齐后再输出 final markdown。"
-        " describe_fields / describe_tag_hierarchies 仅在需要字段或标签层级时调用。"
+        " describe_fields / describe_tag_hierarchies 仅在需要字段或标签层级时调用，参数只给 dataset_id。"
+        " query_stats / search_records / sample_records 用 dataset_id，时间窗放进 filters 对象"
+        "（order_date 的 gte/lte），聚合用 metrics 对象，不要传 name、dataset、start、end"
+        " 或 metric 字符串；group_by 与 limit 照常。"
         "用户要下钻某条发现的依据时，调用 sample_records 或 search_records。"
     ),
     "allowed_tools": [
