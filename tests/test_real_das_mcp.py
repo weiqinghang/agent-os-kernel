@@ -1078,6 +1078,8 @@ def test_kernel_routes_and_hitl(monkeypatch, tmp_path):
     created_default = create_session(None)
     assert created_default["bindings"]["dataset"] == SEED
     assert get_skill()["default_bindings"]["dataset"] == SEED
+    prompt = get_skill()["system_prompt"]
+    assert "原文引用" in prompt and "time_window.label" in prompt
     assert allow_tool("describe_fields") and allow_tool("describe_tag_hierarchies")
     assert not allow_tool("drop_table")
     assert requires_final_confirm("email_send")

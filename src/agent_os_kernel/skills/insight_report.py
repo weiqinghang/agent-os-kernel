@@ -24,6 +24,8 @@ SKILL: dict[str, Any] = {
         "（order_id、sku、category、channel、province、order_date、qty、gmv、returned）；"
         "缺省时网关会补上这组字段。数据集已发布默认证据字段时也可传 evidence_preset 为 default。"
         "用户要下钻某条发现的依据时，调用 sample_records 或 search_records。"
+        "最终 markdown 在 Context bindings 已给出 dataset 与 time_window 时，"
+        "必须原文引用 dataset（dataset_id）和 time_window.label，不要改写这两个字面值。"
     ),
     "allowed_tools": [
         "list_datasets",

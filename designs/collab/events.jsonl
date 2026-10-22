@@ -20,3 +20,4 @@
 {"ts":"2026-10-23T00:48:00+08:00","from":"Grok","to":"*","action":"note","artifact":"designs/collab/2026-10-23-batch-c-midflight.md","summary":"Batch C：回合 POST 立即返回 run_id，events 用 after_id 增量拉取，聊天条带随真实事件更新","refs":[]}
 {"ts":"2026-10-23T01:22:41+08:00","from":"Grok","to":"*","action":"note","artifact":"designs/collab/2026-10-23-batch-d-cancel.md","summary":"Batch D：进行中的 Run 可取消为 cancelled，人话收尾「已停止」；已结束再取消返回 409","refs":[]}
 {"ts":"2026-10-23T01:31:20+08:00","from":"Grok","to":"*","action":"note","artifact":"designs/collab/2026-10-23-batch-f-native-tools.md","summary":"Batch F：live chat/completions 改走 tools 与 tool 角色；decide 签名不变，JSON 正文仅作回退","refs":[]}
+{"ts":"2026-10-23T01:45:00+08:00","from":"Grok","to":"*","action":"note","artifact":"designs/collab/2026-10-23-uat-beat3-wording.md","summary":"UAT 第三拍改为 bindings/events 见证换窗；insight 提示要求原文引用数据集 id 与时间窗标签","refs":[]}
