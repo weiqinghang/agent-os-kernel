@@ -343,7 +343,8 @@ export function boot(doc, win) {
     const status = view.status;
     const markdown = view.markdown || view.message || view.text || "";
     if (status === "failed") {
-      addMsg("assistant", visibleAssistant("failed", markdown));
+      const extra = view.run_id ? retryControl(view.run_id) : null;
+      addMsg("assistant", visibleAssistant("failed", markdown), extra);
       return;
     }
     let msgEl;
@@ -560,6 +561,43 @@ export function boot(doc, win) {
     e.preventDefault();
     submitText(inp.value);
   });
+
+  function retryControl(runId) {
+    const wrap = doc.createElement("div");
+    wrap.className = "retry";
+    const btn = doc.createElement("button");
+    btn.type = "button";
+    btn.textContent = "重试";
+    btn.addEventListener("click", () => {
+      retryRun(runId, btn);
+    });
+    wrap.appendChild(btn);
+    return wrap;
+  }
+
+  async function retryRun(runId, btn) {
+    if (btn) btn.disabled = true;
+    sendBtn.disabled = true;
+    addMsg("user", "请重试上一轮。");
+    win.__stripsThisTurn = 0;
+    const strip = showProgress();
+    try {
+      const resp = await win.fetch("/runs/" + encodeURIComponent(runId) + "/retry", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+      });
+      const body = await resp.json();
+      if (!resp.ok || !body || !body.run_id) throw new Error("retry");
+      await followTurn(strip, body);
+    } catch (_) {
+      clearProgress();
+      addMsg("assistant", visibleAssistant("failed", ""));
+    } finally {
+      sendBtn.disabled = false;
+      if (inp.focus) inp.focus();
+    }
+  }
 
   async function resumeHitl(approve) {
     if (!pendingHitl) return;

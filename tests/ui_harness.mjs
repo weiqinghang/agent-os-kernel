@@ -17,6 +17,7 @@ const HTML_PATH = path.join(ROOT, "ui/chat/index.html");
 
 const SESSION_ID = "ses_abc123def456";
 const RUN_ID = "run_3cbdbe50347f";
+const RETRY_RUN_ID = "run_b7e1c0ffee01";
 const TOKEN = "hitl_0123456789abcdef";
 
 settings.replayMs = 1;
@@ -371,6 +372,12 @@ function installFetch(window, opts) {
   window.__bindings = null;
   window.__messagePosts = 0;
   window.__resumePosts = 0;
+  window.__retryPosts = 0;
+  window.__retryUrl = "";
+  window.__retryBody = "";
+  window.__retryOf = "";
+  window.__followedRunId = "";
+  window.__eventUrls = [];
   window.__cancelPosts = 0;
   window.__cancelUrl = "";
   window.__cancelPending = null;
@@ -411,6 +418,14 @@ function route(window, url, options) {
     window.__resumePosts += 1;
     return new Promise((resolve) => window.__pending.push({ resolve }));
   }
+  if (method === "POST" && url.includes("/retry")) {
+    window.__retryPosts += 1;
+    window.__retryUrl = url;
+    window.__retryBody = options.body || "";
+    const matched = url.match(/\/runs\/([^/]+)\/retry/);
+    window.__retryOf = matched ? decodeURIComponent(matched[1]) : "";
+    return new Promise((resolve) => window.__pending.push({ resolve }));
+  }
   if (method === "POST" && url.includes("/cancel")) {
     window.__cancelPosts += 1;
     window.__cancelUrl = url;
@@ -433,8 +448,12 @@ function route(window, url, options) {
     const parsed = new URL(url, "http://127.0.0.1:8787");
     const after = Number(parsed.searchParams.get("after_id") || 0);
     const events = (window.__events || []).filter((ev) => ev && typeof ev.id === "number" && ev.id > after);
+    const runMatch = url.match(/\/runs\/([^/]+)\/events/);
+    const polledId = runMatch ? decodeURIComponent(runMatch[1]) : RUN_ID;
+    window.__followedRunId = polledId;
+    window.__eventUrls.push(url);
     const body = {
-      run_id: RUN_ID,
+      run_id: polledId,
       state: window.__runState || null,
       events,
     };
@@ -523,6 +542,13 @@ function snapshot() {
     debugVisible: isShown(doc.querySelector("label.debug-toggle")),
     activeChip: active ? active.getAttribute("data-label") : "",
     messagePosts: win.__messagePosts || 0,
+    retryPosts: win.__retryPosts || 0,
+    retryUrl: win.__retryUrl || "",
+    retryBody: win.__retryBody || "",
+    retryOf: win.__retryOf || "",
+    resumePosts: win.__resumePosts || 0,
+    followedRunId: win.__followedRunId || "",
+    eventUrls: (win.__eventUrls || []).slice(),
     pending: (win.__pending || []).length,
     lastRequestText: win.__lastRequestText || "",
     stripsThisTurn: win.__stripsThisTurn || 0,
@@ -701,6 +727,71 @@ async function doFinish(msg) {
   return snapshot();
 }
 
+function retryEvents() {
+  return [
+    { kind: "retry", payload: { retry_of: RUN_ID } },
+    {
+      kind: "plan",
+      payload: {
+        tools: ["query_stats", "sample_records"],
+        mode: "live",
+        thinking: "hidden-cot chain-of-thought",
+      },
+    },
+    { kind: "state", payload: { state: "acting" } },
+    { kind: "model_step", payload: { step: 0, type: "tool_calls", mode: "stub", n_calls: 1 } },
+    { kind: "tool_call", payload: { ok: true, tool: "query_stats", name: "query_stats" } },
+    { kind: "model_step", payload: { step: 1, type: "final", mode: "live" } },
+    { kind: "state", payload: { state: "completed" } },
+  ];
+}
+
+async function doReleaseRetry() {
+  const win = current.win;
+  win.__events = stamp(win, retryEvents());
+  win.__runsFail = false;
+  win.__runsBadJson = false;
+  win.__runState = "completed";
+  win.__result = CONCLUSION;
+  win.__hitl = null;
+  win.__bindings = {
+    time_window: { label: "近90天", start: "2025-07-25", end: "2025-10-22" },
+  };
+  const pending = (win.__pending || []).shift();
+  if (!pending) throw new Error("no pending request");
+  pending.resolve(
+    jsonResponse({
+      session_id: SESSION_ID,
+      run_id: RETRY_RUN_ID,
+      retry_of: win.__retryOf || RUN_ID,
+      status: "created",
+      accepted: true,
+      context_bindings: win.__bindings,
+    })
+  );
+  await waitUntil(() => {
+    const btn = current.doc.getElementById("send");
+    return (
+      current.doc.querySelectorAll(".progress-strip").length === 0 &&
+      textOf(current.doc.body).includes("发现") &&
+      !!(btn && !btn.disabled)
+    );
+  }, 800);
+  return snapshot();
+}
+
+async function doRetryFail() {
+  const win = current.win;
+  const pending = (win.__pending || []).shift();
+  if (!pending) throw new Error("no pending request");
+  pending.resolve(jsonResponse({}, 409));
+  await waitUntil(() => {
+    const btn = current.doc.getElementById("send");
+    return current.doc.querySelectorAll(".progress-strip").length === 0 && !!(btn && !btn.disabled);
+  }, 800);
+  return snapshot();
+}
+
 async function doAckCancel() {
   const win = current.win;
   win.__events = (win.__events || []).concat(
@@ -767,6 +858,8 @@ async function handle(msg) {
   if (msg.op === "push") return doPush(msg);
   if (msg.op === "finish") return doFinish(msg);
   if (msg.op === "ack-cancel") return doAckCancel();
+  if (msg.op === "release-retry") return doReleaseRetry();
+  if (msg.op === "retry-fail") return doRetryFail();
   if (msg.op === "chip") return doChip(msg.label);
   if (msg.op === "click") return doClick(msg.text);
   if (msg.op === "label") return doLabel();

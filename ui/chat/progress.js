@@ -74,7 +74,8 @@ export function projectPlan(events) {
 function suggest(ev) {
   const kind = ev && ev.kind;
   const p = payloadOf(ev);
-  if (kind === "plan") return null;
+  // plan 交给计划卡；retry 只记新回合。呼吸条文案仍走白名单，不读载荷。
+  if (kind === "plan" || kind === "retry") return null;
   if (kind === "tool_call") return "正在查询数据";
   if (kind === "assistant") return "正在整理结论";
   if (kind === "hitl") {
