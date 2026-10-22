@@ -109,26 +109,66 @@ def seed(db_path: Path, n: int = 10_000, seed_val: int = 42) -> int:
         """
     )
     cols = "id,order_id,sku,category,channel,province,order_date,qty,gmv,returned"
-    cur.execute(
-        "INSERT INTO datasets_meta VALUES (?,?,?,?)",
-        (
-            "ecommerce_sales",
-            "近90天电商订单行（POC 自造）",
-            n,
-            cols,
-        ),
-    )
+    # ecommerce_sales_v2 is the dogfood seed id (real DAS). Keep the overnight
+    # name as an alias so older sessions still resolve on the fake path.
+    for name, description in (
+        ("ecommerce_sales_v2", "电商销量狗粮种子（与真 DAS seed 同 id）"),
+        ("ecommerce_sales", "近90天电商订单行（POC 自造，别名）"),
+    ):
+        cur.execute(
+            "INSERT INTO datasets_meta VALUES (?,?,?,?)",
+            (name, description, n, cols),
+        )
     conn.commit()
     count = cur.execute("SELECT COUNT(*) FROM sales").fetchone()[0]
     conn.close()
     return count
 
 
+def ensure_dataset_alias(db_path: Path, name: str = "ecommerce_sales_v2") -> None:
+    """Add the dogfood dataset id to an existing fake DB without reseeding rows."""
+    if not db_path.exists():
+        return
+    conn = sqlite3.connect(db_path)
+    cur = conn.cursor()
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS datasets_meta (
+            name TEXT PRIMARY KEY,
+            description TEXT,
+            row_count INTEGER,
+            columns TEXT
+        )
+        """
+    )
+    row = cur.execute("SELECT 1 FROM datasets_meta WHERE name=?", (name,)).fetchone()
+    if row:
+        conn.close()
+        return
+    n = cur.execute("SELECT COUNT(*) FROM sales").fetchone()[0]
+    cols = "id,order_id,sku,category,channel,province,order_date,qty,gmv,returned"
+    cur.execute(
+        "INSERT INTO datasets_meta VALUES (?,?,?,?)",
+        (name, "电商销量狗粮种子（与真 DAS seed 同 id）", n, cols),
+    )
+    conn.commit()
+    conn.close()
+
+
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--db", type=Path, default=DEFAULT_DB)
     p.add_argument("--n", type=int, default=10_000)
+    p.add_argument(
+        "--ensure-alias",
+        action="store_true",
+        help="only insert ecommerce_sales_v2 into an existing sales.db",
+    )
     args = p.parse_args()
+    if args.ensure_alias:
+        ensure_dataset_alias(args.db)
+        print(f"alias ensured -> {args.db}")
+        return
     count = seed(args.db, args.n)
     print(f"seeded {count} rows -> {args.db}")
 

@@ -15,6 +15,7 @@
 | ✅ | [v0 架构稿（C 时代参考）](../2026-10-21-enterprise-agent-framework-v0.md) |
 | ⏳ | M1 包边界 + Run/HITL/DAS 接口草图 |
 | 🚫 | v0 实现（须另令拉嘉树） |
+| ✅ | [箱内真 DAS 运维](./DAS-LOCAL-ON-BOX.md)（默认启动；假 DAS 仅开关） |
 
 ## 开放问题（不挡 M1）
 

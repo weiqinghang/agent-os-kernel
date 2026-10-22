@@ -1,13 +1,10 @@
 """Read-only policy; outbound actions require final_confirm."""
 from __future__ import annotations
 
-READ_ONLY_TOOLS = {
-    "list_datasets",
-    "describe_dataset",
-    "query_stats",
-    "search_records",
-    "sample_records",
-}
+from .tool_gateway import WHITELIST
+
+# Same set as the gateway SoT (includes describe_fields / describe_tag_hierarchies).
+READ_ONLY_TOOLS = set(WHITELIST)
 
 OUTBOUND_ACTIONS = {"email_send", "slack_post", "export_external"}
 

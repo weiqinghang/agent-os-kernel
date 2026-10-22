@@ -11,10 +11,19 @@ _KNOWN = frozenset(
     {"skill", "dataset", "time_window", "project_id", "tenant_id", "extras", "project"}
 )
 _DATASET_TOOLS = frozenset(
-    {"describe_dataset", "query_stats", "search_records", "sample_records"}
+    {
+        "describe_dataset",
+        "describe_fields",
+        "describe_tag_hierarchies",
+        "query_stats",
+        "search_records",
+        "sample_records",
+    }
 )
 
-DEFAULT_DATASET = "ecommerce_sales"
+# Dogfood seed published by the on-box dataset-analysis-service.
+SEED_DATASET_ID = "ecommerce_sales_v2"
+DEFAULT_DATASET = SEED_DATASET_ID
 DEFAULT_SKILL = "insight_report"
 
 

@@ -5,6 +5,8 @@ import json
 import re
 from typing import Any
 
+from ..context import SEED_DATASET_ID
+
 SKILL: dict[str, Any] = {
     "name": "insight_report",
     "version": "0.3.0",
@@ -13,11 +15,14 @@ SKILL: dict[str, Any] = {
         "每条发现必须带 evidence 指纹；禁止臆造数字或绕过工具网关。"
         "需要数据时先发 tool_calls（list_datasets / describe_dataset / query_stats / "
         "sample_records / search_records），证据齐后再输出 final markdown。"
+        " describe_fields / describe_tag_hierarchies 仅在需要字段或标签层级时调用。"
         "用户要下钻某条发现的依据时，调用 sample_records 或 search_records。"
     ),
     "allowed_tools": [
         "list_datasets",
         "describe_dataset",
+        "describe_fields",
+        "describe_tag_hierarchies",
         "query_stats",
         "search_records",
         "sample_records",
@@ -27,7 +32,7 @@ SKILL: dict[str, Any] = {
         "outline_confirm": "请确认报告大纲后继续（范围以会话 Context bindings 为准）。",
     },
     "default_bindings": {
-        "dataset": "ecommerce_sales",
+        "dataset": SEED_DATASET_ID,
         "time_window": {"label": "近90天", "start": "2025-07-25", "end": "2025-10-22"},
     },
 }
@@ -111,7 +116,7 @@ def _tw_args(bindings: dict[str, Any]) -> dict[str, Any]:
             out["start"] = tw["start"]
         if tw.get("end"):
             out["end"] = tw["end"]
-    ds = bindings.get("dataset") or "ecommerce_sales"
+    ds = bindings.get("dataset") or SEED_DATASET_ID
     out["name"] = ds
     return out
 
@@ -119,7 +124,7 @@ def _tw_args(bindings: dict[str, Any]) -> dict[str, Any]:
 def _report_plan(bindings: dict[str, Any]) -> list[dict[str, Any]]:
     tw = _tw_args(bindings)
     base = {k: tw[k] for k in ("start", "end") if k in tw}
-    ds = {"name": tw.get("name", "ecommerce_sales"), **base}
+    ds = {"name": tw.get("name", SEED_DATASET_ID), **base}
     return [
         {"name": "list_datasets", "arguments": {}},
         {"name": "describe_dataset", "arguments": dict(ds)},

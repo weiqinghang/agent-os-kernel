@@ -25,8 +25,9 @@ package = true
 dev = [
   "pytest>=8.3",
   "pytest-bdd>=8.1",
+  "pytest-cov>=6.0",
 ]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-q"
+addopts = "-q --cov=agent_os_kernel.tool_gateway --cov=agent_os_kernel.policy --cov=agent_os_kernel.context --cov=agent_os_kernel.main --cov=agent_os_kernel.skills.insight_report --cov-report=term-missing --cov-fail-under=90"

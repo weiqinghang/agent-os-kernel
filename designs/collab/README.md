@@ -7,5 +7,6 @@
 | `events.jsonl` | append-only 真相源；一行一事 |
 | `BOARD.md` | 当前态看板（由事件 mirror，可手改但以事件为准） |
 | `SCHEMA.md` | 事件字段与动作枚举 |
+| `DAS-LOCAL-ON-BOX.md` | 箱内真 DAS 默认启动、Bearer MCP、假 DAS 开关 |
 
 硬规则：点对点收口也必须落事件；聊天不算真相。
