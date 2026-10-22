@@ -102,6 +102,23 @@ const LEAKY = [
   "_数字均来自 Tool Gateway；可追问下钻。_",
 ].join("\n");
 
+const DRILL = [
+  "## 第2条依据",
+  "",
+  "这条发现讲的是渠道 **抖音电商**。下面只列出「抖音电商」的样本。",
+  "",
+  "共 5 条样本（展示前 5）：",
+  "",
+  "1. ORD1001 · 电子产品 · 抖音电商 · 江苏 · 2025-10-03 · GMV=110",
+  "2. ORD1002 · 电子产品 · 抖音电商 · 江苏 · 2025-10-03 · GMV=120",
+  "3. ORD1003 · 电子产品 · 抖音电商 · 江苏 · 2025-10-04 · GMV=130",
+  "4. ORD1004 · 电子产品 · 抖音电商 · 江苏 · 2025-10-04 · GMV=140",
+  "5. ORD1005 · 电子产品 · 抖音电商 · 江苏 · 2025-10-05 · GMV=150",
+  "   - evidence: `deadbeefcafe`",
+  "",
+  "_evidence: `deadbeefcafe`_",
+].join("\n");
+
 let current = null;
 
 if (process.stdout._handle && process.stdout._handle.setBlocking) {
@@ -223,6 +240,12 @@ function successBody() {
 
 function releaseSpec(kind) {
   if (kind === "success") return { body: successBody(), events: realisticEvents() };
+  if (kind === "drill") {
+    return {
+      body: { run_id: RUN_ID, status: "completed", markdown: DRILL, text: DRILL },
+      events: [],
+    };
+  }
   if (kind === "leaky") {
     return {
       body: {
@@ -382,6 +405,11 @@ function route(window, url, options) {
   return Promise.resolve(jsonResponse({}, 404));
 }
 
+function isShown(el) {
+  if (!el) return false;
+  return !el.hidden && !el.hasAttribute("hidden");
+}
+
 function textOf(el) {
   if (!el) return "";
   if (typeof el.innerText === "string") return el.innerText;
@@ -437,6 +465,7 @@ function snapshot() {
     datasetChips: doc.querySelectorAll("[data-dataset], .chip-focus, .focus-chip").length,
     diff: !!doc.querySelector(".diff, .compare, .side-by-side"),
     debugChecked: !!doc.getElementById("debug-chain").checked,
+    debugVisible: isShown(doc.querySelector("label.debug-toggle")),
     activeChip: active ? active.getAttribute("data-label") : "",
     messagePosts: win.__messagePosts || 0,
     pending: (win.__pending || []).length,
@@ -459,7 +488,7 @@ async function doReset(msg) {
   const virtualConsole = new VirtualConsole();
   virtualConsole.on("jsdomError", (err) => process.stderr.write(String(err) + "\n"));
   const dom = new JSDOM(html, {
-    url: "http://127.0.0.1:8787/",
+    url: (msg && msg.url) || "http://127.0.0.1:8787/",
     pretendToBeVisual: true,
     virtualConsole,
     beforeParse(window) {
@@ -532,14 +561,54 @@ async function doAccept(msg) {
   return snapshot();
 }
 
+function pushEvents(kind) {
+  if (kind === "tool") return [{ kind: "tool_call", payload: { ok: true } }];
+  if (kind === "writing") {
+    return [
+      {
+        kind: "model_step",
+        payload: {
+          step: 2,
+          type: "loop_break",
+          loop_break: true,
+          repeated_tool: "query_stats",
+          fingerprint: "deadbeef",
+          mode: "stub",
+          thinking: "hidden-cot chain-of-thought",
+        },
+      },
+      { kind: "model_step", payload: { step: 3, type: "finalizing", n_calls: 0, mode: "live" } },
+      { kind: "model_step", payload: { step: 3, finalizing: true, type: "note" } },
+      { kind: "model_step", payload: { step: 4, loop_break: true } },
+      { kind: "model_step", payload: { step: 5, type: "wrap", n_calls: 0 } },
+      { kind: "model_step", payload: { step: 6, type: "final", n_calls: 0, loop_break: true, mode: "stub" } },
+      { kind: "state", payload: { state: "finalizing" } },
+      { kind: "model_step", payload: { mode: "stub" } },
+      { kind: "model_step", payload: { step: 7, type: "tool_calls", n_calls: 0, loop_break: true, mode: "stub" } },
+    ];
+  }
+  if (kind === "phase") {
+    return [
+      { kind: "phase_writing", payload: { phase: "phase_writing", thinking: "hidden-cot" } },
+      { kind: "phase_thinking", payload: { phase: "phase_thinking", thinking: "chain-of-thought secret" } },
+      { kind: "phase_tool", payload: { name: "query_stats" } },
+    ];
+  }
+  return [{ kind: "model_step", payload: { step: 0, type: "tool_calls" } }];
+}
+
+function progressExpect(kind) {
+  if (kind === "tool") return "正在查询数据";
+  if (kind === "writing") return "正在整理结论";
+  return "思考中";
+}
+
 async function doPush(msg) {
   const win = current.win;
-  const expect = msg.kind === "tool" ? "正在查询数据" : "思考中";
-  const extra =
-    msg.kind === "tool"
-      ? [{ kind: "tool_call", payload: { ok: true } }]
-      : [{ kind: "model_step", payload: { step: 0, type: "tool_calls" } }];
-  win.__events = (win.__events || []).concat(stamp(win, extra));
+  const before = win.__polls || 0;
+  const expect = progressExpect(msg.kind);
+  win.__events = (win.__events || []).concat(stamp(win, pushEvents(msg.kind)));
+  await waitUntil(() => (win.__polls || 0) >= before + 3, 800);
   await waitUntil(() => {
     const strip = current.doc.querySelector(".progress-strip");
     const text = strip && strip.querySelector(".progress-text");

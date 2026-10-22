@@ -22,3 +22,4 @@
 {"ts":"2026-10-23T01:31:20+08:00","from":"Grok","to":"*","action":"note","artifact":"designs/collab/2026-10-23-batch-f-native-tools.md","summary":"Batch F：live chat/completions 改走 tools 与 tool 角色；decide 签名不变，JSON 正文仅作回退","refs":[]}
 {"ts":"2026-10-23T01:45:00+08:00","from":"Grok","to":"*","action":"note","artifact":"designs/collab/2026-10-23-uat-beat3-wording.md","summary":"UAT 第三拍改为 bindings/events 见证换窗；insight 提示要求原文引用数据集 id 与时间窗标签","refs":[]}
 {"ts":"2026-10-23T01:46:00+08:00","from":"Grok","to":"*","action":"note","artifact":"designs/collab/2026-10-23-batch-e-context-length.md","summary":"Batch E：超长消息和工具结果在 decide 前按规则截断，保留系统提示、最近用户话和较新成功证据","refs":[]}
+{"ts":"2026-10-23T02:03:56+08:00","from":"Grok","to":"*","action":"note","artifact":"designs/collab/2026-10-23-p0prime-chat-nits.md","summary":"P0′ 四条聊天小修：依据按钮不冒第5条、确认留下用户气泡、调试入口改 ?debug=1、收尾文案认 late model_step","refs":[]}

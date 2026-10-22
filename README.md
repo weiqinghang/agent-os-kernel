@@ -55,7 +55,7 @@ npm install
 uv run pytest
 ```
 
-产品行为在 `tests/features/ui_p0_prime.feature`（进度、脱敏、时间窗确认，以及结论正文脱敏、业务空态、确认不发占位符、第 N 条依据对齐）。覆盖率门是 `ui/chat` 行覆盖 ≥ 90%（c8，pytest 收尾执行）。仓库里没有 `.playbook/docs/project/product-development-xp-contract.md`，按 agent-os-btdd 最小规则。
+产品行为在 `tests/features/ui_p0_prime.feature`（进度、脱敏、时间窗确认，以及结论正文脱敏、业务空态、确认留下用户气泡、依据按钮不冒号、调试入口默认隐藏、第 N 条依据对齐）。覆盖率门是 `ui/chat` 行覆盖 ≥ 90%（c8，pytest 收尾执行）。仓库里没有 `.playbook/docs/project/product-development-xp-contract.md`，按 agent-os-btdd 最小规则。
 
 详见 [过夜计划](designs/2026-10-22-overnight-ecommerce-insight-poc.md)、[链路补强](designs/2026-10-22-kernel-chain-hardening.md)、`STATUS.md`。
 

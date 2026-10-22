@@ -23,6 +23,23 @@ function payloadOf(ev) {
   return p && typeof p === "object" ? p : {};
 }
 
+const SEEKING_TYPES = new Set(["tool_calls", "live_retry", "live_fallback", "live_fallback_stub"]);
+const WRITING_TYPES = new Set(["final", "finalizing", "loop_break"]);
+
+/**
+ * 收尾才进「正在整理结论」。认 late model_step（final / finalizing / loop_break，
+ * 或这两个标记，或已不再要工具且 n_calls 为 0）。不认 phase_*，也不读工具名。
+ */
+function writingModelStep(p) {
+  const type = typeof p.type === "string" ? p.type : "";
+  if (SEEKING_TYPES.has(type)) return false;
+  if (WRITING_TYPES.has(type)) return true;
+  if (p.finalizing === true) return true;
+  if (p.loop_break === true) return true;
+  if (p.n_calls === 0 && type) return true;
+  return false;
+}
+
 /** 只看 kind 与少量中性字段。不读取 name/tool/mode/id/thinking。 */
 function suggest(ev) {
   const kind = ev && ev.kind;
@@ -34,12 +51,12 @@ function suggest(ev) {
     return "等确认";
   }
   if (kind === "model_step") {
-    if (p.type === "final") return "正在整理结论";
+    if (writingModelStep(p)) return "正在整理结论";
     return "思考中";
   }
   if (kind === "state") {
     if (p.state === "awaiting_hitl") return "等确认";
-    if (p.state === "completed") return "正在整理结论";
+    if (p.state === "completed" || p.state === "finalizing") return "正在整理结论";
     if (p.state === "failed") return "failed";
     if (p.state === "acting" || p.state === "created") return "思考中";
     return null;
@@ -113,29 +130,43 @@ export function visibleAssistant(status, markdown) {
  * 市场经理看见的结论。指纹、dataset、Tool Gateway 留在原文里，默认不上屏。
  * 调试开关打开时原文照示，供对指纹。不另建脱敏服务。
  */
+function stripSurface(line) {
+  return line
+    .replace(/dataset\s*=\s*`[^`]*`\s*[；;]?\s*/gi, "")
+    .replace(/dataset\s*=\s*\S+\s*[；;]?\s*/gi, "");
+}
+
+/** 依据按钮只挂在「这一条自己的依据条目」上。连续编号（样本 1.–5.）不算。 */
+function ownsEvidence(line, pending, streak) {
+  if (!/^\s*[-*+]\s*evidence\s*:/i.test(line)) return false;
+  return !!(pending && streak === 1);
+}
+
 export function presentAssistant(markdown, debug) {
   const raw = String(markdown || "");
   if (debug) return { text: raw, actions: [] };
   const actions = [];
   const seen = new Set();
-  let finding = null;
+  let pending = null;
+  let streak = 0;
   const kept = [];
   for (const line of raw.split(/\r?\n/)) {
     const num = /^\s*(\d+)\.\s/.exec(line);
-    if (num) finding = Number(num[1]);
+    if (num) {
+      pending = Number(num[1]);
+      streak += 1;
+    }
     if (/evidence\s*:/i.test(line)) {
-      if (finding && !seen.has(finding)) {
-        seen.add(finding);
-        actions.push({ n: finding, label: "查看第" + finding + "条依据" });
+      if (ownsEvidence(line, pending, streak) && !seen.has(pending)) {
+        seen.add(pending);
+        actions.push({ n: pending, label: "查看第" + pending + "条依据" });
       }
+      pending = null;
+      streak = 0;
       continue;
     }
     if (/tool\s*gateway/i.test(line)) continue;
-    kept.push(
-      line
-        .replace(/dataset\s*=\s*`[^`]*`\s*[；;]?\s*/gi, "")
-        .replace(/dataset\s*=\s*\S+\s*[；;]?\s*/gi, "")
-    );
+    kept.push(stripSurface(line));
   }
   return { text: kept.join("\n"), actions };
 }

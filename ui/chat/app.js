@@ -200,7 +200,14 @@ export function boot(doc, win) {
     return !!(box && box.checked);
   }
 
+  function debugEntryEnabled() {
+    const search = (win.location && win.location.search) || "";
+    return new URLSearchParams(search).get("debug") === "1";
+  }
+
   const debugBox = doc.getElementById("debug-chain");
+  const debugLabel = doc.querySelector("label.debug-toggle");
+  if (debugLabel) debugLabel.hidden = !debugEntryEnabled();
   if (debugBox) {
     debugBox.addEventListener("change", () => {
       msgs.querySelectorAll(".msg.assistant").forEach((div) => {
@@ -430,12 +437,14 @@ export function boot(doc, win) {
     ok.type = "button";
     ok.textContent = "确认";
     ok.onclick = async () => {
+      const text = "用" + tw.label + "再出一版洞察报告";
       try {
         card.remove();
         pendingRebind = null;
+        addMsg("user", text);
         await patchSessionTw(tw);
         setChipActive(chipKey(tw));
-        submitText("用" + tw.label + "再出一版洞察报告");
+        await submitText(text, { echo: false });
       } catch (_) {
         addMsg("assistant", visibleAssistant("failed", ""));
       }
@@ -484,12 +493,12 @@ export function boot(doc, win) {
     }
   });
 
-  async function submitText(text) {
+  async function submitText(text, opts) {
     const value = String(text || "").trim();
     if (!value) return;
     inp.value = "";
     sendBtn.disabled = true;
-    addMsg("user", value);
+    if (!opts || opts.echo !== false) addMsg("user", value);
     win.__stripsThisTurn = 0;
     const strip = showProgress();
     try {

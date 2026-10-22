@@ -26,6 +26,15 @@ def open_ui(world):
     snap = world["snap"]
     assert snap["debugChecked"] is False
     assert snap["chain"] is False
+    assert snap["debugVisible"] is False
+
+
+@given("地址栏带有调试入口的洞察助手")
+def open_debug_entry(world):
+    snap = _call(world, {"op": "reset", "url": "http://127.0.0.1:8787/?debug=1"})
+    world["snap"] = snap
+    assert snap["debugVisible"] is True
+    assert snap["debugChecked"] is False
 
 
 @given("会话创建失败的洞察助手")
@@ -182,6 +191,29 @@ def never_fake_tool_step(world):
     assert world["snap"]["progress"] != "正在查询数据"
 
 
+@then("进度文案始终不含「正在整理结论」")
+def never_writing_copy(world):
+    assert "正在整理结论" not in world["snap"]["updates"]
+    assert world["snap"]["progress"] != "正在整理结论"
+
+
+@then("调试开关不可见")
+def debug_hidden(world):
+    assert world["snap"]["debugVisible"] is False
+    assert "调试" not in world["snap"]["buttons"]
+
+
+@then("调试开关可见")
+def debug_shown(world):
+    assert world["snap"]["debugVisible"] is True
+
+
+@then("调试开关仍是关闭")
+def debug_still_off(world):
+    assert world["snap"]["debugChecked"] is False
+    assert world["snap"]["chain"] is False
+
+
 @then("页面没有调试链路")
 def no_debug_chain(world):
     snap = world["snap"]
@@ -266,6 +298,12 @@ def progress_query(world):
     assert world["snap"]["progress"] == "正在查询数据"
 
 
+@then("进度文案是「正在整理结论」")
+def progress_writing(world):
+    assert world["snap"]["progress"] == "正在整理结论"
+    assert world["snap"]["updates"][-1] == "正在整理结论"
+
+
 @then("进度条带没有出现")
 def no_strip(world):
     assert world["snap"]["stripCount"] == 0
@@ -286,6 +324,12 @@ def strip_gone(world):
 @then(parsers.parse("出现按钮「{label}」"))
 def has_button(world, label):
     assert label in world["snap"]["buttons"]
+
+
+@then(parsers.parse("页面没有按钮「{label}」"))
+def no_button(world, label):
+    assert label not in world["snap"]["buttons"]
+    assert label not in world["snap"]["body"]
 
 
 @then(parsers.parse("出现一行复述且包含「{text}」"))
@@ -379,6 +423,21 @@ def conclusion_without(world, text):
 @when("运行返回带技术串的结论")
 def release_leaky(world):
     _call(world, {"op": "release", "kind": "leaky"})
+
+
+@when("运行返回带样本编号的依据")
+def release_drill_view(world):
+    _call(world, {"op": "release", "kind": "drill"})
+
+
+@when("后台进入收尾整理")
+def push_writing(world):
+    _call(world, {"op": "push", "kind": "writing"})
+
+
+@when("后台出现未注册的阶段事件")
+def push_phase(world):
+    _call(world, {"op": "push", "kind": "phase"})
 
 
 _FIELD = {
