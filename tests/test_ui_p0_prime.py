@@ -1,9 +1,12 @@
-"""P0′ 产品行为：进度条带、脱敏、时间窗一行确认。"""
+"""P0′ 产品行为：进度条带、脱敏、时间窗一行确认，以及 UAT 三件必须改。"""
 from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from pytest_bdd import given, parsers, scenarios, then, when
+
+from agent_os_kernel.skills.insight_report import SKILL, stub_decide
 
 scenarios(str(Path(__file__).parent / "features" / "ui_p0_prime.feature"))
 
@@ -273,11 +276,156 @@ def current_window(world, label):
     assert f"时间窗 {label}" in snap["body"]
 
 
-@then("待发送的问题是洞察报告")
-def pending_report(world):
+@then(parsers.parse("待发送的问题是「{text}」"))
+def pending_exact(world, text):
     snap = world["snap"]
-    assert "洞察报告" in snap["lastRequestText"]
+    assert snap["lastRequestText"] == text
     assert snap["pending"] == 1
+
+
+@then("待发送的问题不是输入框占位符")
+def pending_not_placeholder(world):
+    snap = world["snap"]
+    text = snap["lastRequestText"]
+    assert text
+    assert text != snap["placeholder"]
+    assert "例如：" not in text
+    assert not text.startswith("请基于电商销量数据")
+
+
+@then("用户气泡里没有输入框占位符")
+def bubble_not_placeholder(world):
+    snap = world["snap"]
+    last = snap["userTexts"][-1]
+    assert last != snap["placeholder"]
+    assert "例如：" not in last
+    assert not last.startswith("请基于电商销量数据")
+
+
+@then(parsers.parse("用户气泡是「{text}」"))
+def user_bubble_is(world, text):
+    assert text in world["snap"]["userTexts"]
+
+
+@then("开场没有工程话术")
+def no_engineering_copy(world):
+    body = world["snap"]["body"]
+    for word in ("Skill", "skill", "chip", "三拍", "退货风险"):
+        assert word not in body, word
+
+
+@then(parsers.parse("结论里没有「{text}」"))
+def conclusion_without(world, text):
+    assert text not in world["snap"]["body"]
+
+
+@when("运行返回带技术串的结论")
+def release_leaky(world):
+    _call(world, {"op": "release", "kind": "leaky"})
+
+
+_FIELD = {
+    "类目": "category",
+    "渠道": "channel",
+    "省份": "province",
+    "退货渠道": "channel",
+}
+_TOP = {
+    ("category", "sum_gmv"): "电子产品",
+    ("channel", "sum_gmv"): "抖音电商",
+    ("province", "sum_gmv"): "江苏",
+    ("channel", "return_rate"): "拼多多",
+}
+
+
+def _answer_tool(call: dict) -> dict:
+    name = call.get("name") or ""
+    args = call.get("arguments") or {}
+    if name == "query_stats":
+        key = _TOP.get((args.get("group_by"), args.get("metric")), "不该出现")
+        return {"rows": [{"key": key, "value": 1.0}]}
+    if name == "sample_records":
+        filters = args.get("filters") or {}
+        rec = {
+            "order_id": "ORD1001",
+            "category": filters.get("category", "美妆个护"),
+            "channel": filters.get("channel", "京东"),
+            "province": filters.get("province", "湖北"),
+            "order_date": "2025-10-03",
+            "gmv": 110.0,
+        }
+        return {"count": 2, "records": [rec, {**rec, "order_id": "ORD1002"}]}
+    return {}
+
+
+def _run_drill(text: str) -> dict:
+    bindings = {
+        "dataset": "ecommerce_sales",
+        "time_window": {"label": "近90天", "start": "2025-07-25", "end": "2025-10-22"},
+    }
+    messages = [{"role": "user", "content": text}]
+    tool_results: list[dict] = []
+    samples: list[dict] = []
+    filters: list[dict] = []
+    allowed = list(SKILL["allowed_tools"])
+    for _ in range(6):
+        decision = stub_decide(
+            messages=messages,
+            allowed_tools=allowed,
+            tool_results=tool_results,
+            bindings=bindings,
+        )
+        if decision.get("type") == "final":
+            return {
+                "content": decision.get("content") or "",
+                "samples": samples,
+                "filters": filters,
+            }
+        assert decision.get("type") == "tool_calls", decision
+        for call in decision.get("calls") or []:
+            data = _answer_tool(call)
+            if call.get("name") == "sample_records":
+                filters.append((call.get("arguments") or {}).get("filters") or {})
+                samples.extend(data.get("records") or [])
+            tool_results.append(
+                {
+                    "name": call.get("name"),
+                    "arguments": call.get("arguments") or {},
+                    "data": data,
+                    "evidence": {"fingerprint": "fixturefp"},
+                }
+            )
+    raise AssertionError("drill did not finish")
+
+
+@pytest.fixture
+def drillbox() -> dict:
+    return {}
+
+
+@when(parsers.parse("分析师追问「{text}」"))
+def ask_analyst(drillbox, text):
+    drillbox.update(_run_drill(text))
+
+
+@then(parsers.parse("依据标题是第{n}条"))
+def drill_title(drillbox, n):
+    assert f"第{n}条依据" in drillbox["content"]
+    assert "不该出现" not in drillbox["content"]
+
+
+@then(parsers.parse("抽出的样本都属于{dim}「{value}」"))
+def drill_samples(drillbox, dim, value):
+    field = _FIELD[dim]
+    assert drillbox["samples"], drillbox["content"]
+    assert all(item.get(field) == value for item in drillbox["samples"])
+    assert drillbox["filters"], drillbox["content"]
+    assert all(item.get(field) == value for item in drillbox["filters"])
+
+
+@then(parsers.parse("依据说明写的是「{value}」"))
+def drill_copy(drillbox, value):
+    assert f"**{value}**" in drillbox["content"]
 
 
 @then("页面没有确认卡片")
