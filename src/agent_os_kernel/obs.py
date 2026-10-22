@@ -69,7 +69,8 @@ def init_db() -> None:
                 resume_token TEXT,
                 hitl_kind TEXT,
                 result TEXT,
-                context_bindings TEXT
+                context_bindings TEXT,
+                meta TEXT
             );
             CREATE TABLE IF NOT EXISTS run_events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -84,6 +85,8 @@ def init_db() -> None:
         cols = {r[1] for r in c.execute("PRAGMA table_info(runs)").fetchall()}
         if "context_bindings" not in cols:
             c.execute("ALTER TABLE runs ADD COLUMN context_bindings TEXT")
+        if "meta" not in cols:
+            c.execute("ALTER TABLE runs ADD COLUMN meta TEXT")
 
 
 def emit(run_id: str, kind: str, payload: dict[str, Any] | None = None) -> int:

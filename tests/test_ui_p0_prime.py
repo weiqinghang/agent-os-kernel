@@ -12,6 +12,7 @@ scenarios(str(Path(__file__).parent / "features" / "ui_p0_prime.feature"))
 scenarios(str(Path(__file__).parent / "features" / "midflight_progress.feature"))
 scenarios(str(Path(__file__).parent / "features" / "cancel_progress.feature"))
 scenarios(str(Path(__file__).parent / "features" / "insight_plan_card.feature"))
+scenarios(str(Path(__file__).parent / "features" / "failed_run_retry_ui.feature"))
 
 WHITELIST = {"处理中", "思考中", "正在查询数据", "正在整理结论", "等确认"}
 PLAN_LABELS = [
@@ -623,3 +624,41 @@ def stop_hidden(world):
     assert world["snap"]["stopVisible"] is False
     assert "停止" not in world["snap"]["buttons"]
     assert world["snap"]["stripCount"] == 0
+
+
+@then("已向失败回合发出重试")
+def retry_posted(world):
+    snap = world["snap"]
+    assert snap["retryPosts"] == 1
+    assert snap["messagePosts"] == 1
+    assert snap["resumePosts"] == 0
+    assert snap["retryOf"]
+    assert snap["retryUrl"].endswith("/runs/" + snap["retryOf"] + "/retry")
+    assert "resume_token" not in snap["retryBody"]
+    assert "请重试上一轮。" in snap["userTexts"]
+
+
+@when("重试被接受并在新回合给出结论")
+def release_retry(world):
+    _call(world, {"op": "release-retry"})
+
+
+@then("进度改跟新的回合")
+def followed_new_run(world):
+    snap = world["snap"]
+    assert snap["followedRunId"]
+    assert snap["retryOf"]
+    assert snap["followedRunId"] != snap["retryOf"]
+    assert snap["eventUrls"]
+    assert snap["followedRunId"] in snap["eventUrls"][-1]
+
+
+@when("重试请求被拒绝")
+def retry_rejected(world):
+    _call(world, {"op": "retry-fail"})
+
+
+@then("没有改走确认接口")
+def not_resume(world):
+    assert world["snap"]["resumePosts"] == 0
+    assert world["snap"]["retryPosts"] == 1

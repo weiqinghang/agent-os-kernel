@@ -1,6 +1,7 @@
 """Kernel FastAPI entry — :8787."""
 from __future__ import annotations
 
+import copy
 import os
 import threading
 from pathlib import Path
@@ -197,6 +198,44 @@ class HitlResume(BaseModel):
     resume_token: str
     approve: bool = True
     text: str | None = None
+
+
+class RetryIn(BaseModel):
+    text: str | None = None
+
+
+@app.post("/runs/{run_id}/retry")
+def retry_failed_run(run_id: str, body: RetryIn | None = None) -> dict[str, Any]:
+    """New Run in the same Session. Copies the failed Run's binding snapshot.
+
+    HITL stays on POST /runs/{id}/resume. This route does not take a resume_token
+    and does not move the failed Run back to acting.
+    """
+    rr = run.get_run(run_id)
+    if not rr:
+        raise HTTPException(404, "run not found")
+    if rr["state"] != "failed":
+        raise HTTPException(409, f"run not failed: {rr['state']}")
+    bindings = copy.deepcopy(rr.get("context_bindings") or {})
+    spoken = body.text if body else None
+    created = run.create_run(
+        rr["session_id"],
+        context_bindings=bindings,
+        meta={"retry_of": run_id},
+    )
+    content = run.retry_message(rr.get("result"), spoken)
+    session.add_message(rr["session_id"], "user", content, run_id=created["id"])
+    obs.emit(created["id"], "state", {"state": "created"})
+    obs.emit(created["id"], "retry", {"retry_of": run_id})
+    _start_turn(
+        rr["session_id"],
+        created["id"],
+        orchestrator.handle_user_message,
+        (rr["session_id"], created["id"], content),
+    )
+    accepted = _accept(rr["session_id"], created["id"], bindings)
+    accepted["retry_of"] = run_id
+    return accepted
 
 
 @app.post("/runs/{run_id}/resume")
