@@ -6,7 +6,25 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from typing import Any
+
+LIVE_RETRY_BACKOFF_S = 0.2
+_LIVE_ATTEMPTS = 2
+_ERROR_LIMIT = 160
+
+
+class _LiveRequestError(Exception):
+    """One live chat/completions request failed and may be retried."""
+
+
+def _short_error(exc: BaseException, limit: int = _ERROR_LIMIT) -> str:
+    text = " ".join(str(exc).split())
+    if not text:
+        text = exc.__class__.__name__
+    if len(text) > limit:
+        return text[: limit - 1] + "…"
+    return text
 
 
 def has_llm() -> bool:
@@ -34,16 +52,41 @@ def decide(
     bindings = bindings or {}
     skill_name = skill_name or bindings.get("skill") or "insight_report"
     if has_llm():
-        out = _LiveBackend.decide(
-            system=system,
-            messages=messages,
-            allowed_tools=allowed_tools,
-            tool_results=tool_results,
-        )
-        if out.get("_fallback_stub"):
-            from . import obs  # local; fallback may lack run_id — caller emits
-
-            del out["_fallback_stub"]
+        events: list[dict[str, Any]] = []
+        live: dict[str, Any] | None = None
+        last_error = "live request failed"
+        for attempt in range(1, _LIVE_ATTEMPTS + 1):
+            if attempt > 1:
+                time.sleep(LIVE_RETRY_BACKOFF_S)
+                events.append(
+                    {
+                        "type": "live_retry",
+                        "mode": "live",
+                        "attempt": attempt,
+                        "ok": False,
+                        "error": last_error,
+                    }
+                )
+            try:
+                live = _LiveBackend.decide(
+                    system=system,
+                    messages=messages,
+                    allowed_tools=allowed_tools,
+                    tool_results=tool_results,
+                )
+                break
+            except _LiveRequestError as exc:
+                last_error = _short_error(exc)
+                live = None
+        if live is None:
+            events.append(
+                {
+                    "type": "live_fallback",
+                    "mode": "stub",
+                    "ok": False,
+                    "error": last_error,
+                }
+            )
             stub = _StubBackend.decide(
                 system=system,
                 messages=messages,
@@ -52,9 +95,11 @@ def decide(
                 bindings=bindings,
                 skill_name=skill_name,
             )
-            stub["_live_fallback"] = True
+            stub["_broker_events"] = events
             return stub
-        return out
+        if events:
+            live["_broker_events"] = events
+        return live
     return _StubBackend.decide(
         system=system,
         messages=messages,
@@ -115,15 +160,21 @@ class _LiveBackend:
                     headers={"Authorization": f"Bearer {key}"},
                     json={"model": model, "messages": chat_msgs, "temperature": 0.2},
                 )
-            if r.status_code == 200:
-                text = r.json()["choices"][0]["message"]["content"]
-                parsed = _parse_json_decision(text)
-                if parsed:
-                    return parsed
-                return {"type": "final", "content": text}
-        except Exception:  # noqa: BLE001
-            pass
-        return {"type": "final", "content": "", "_fallback_stub": True}
+        except Exception as exc:
+            detail = " ".join(str(exc).split()) or exc.__class__.__name__
+            raise _LiveRequestError(f"live request failed: {detail}") from exc
+        if r.status_code != 200:
+            raise _LiveRequestError(f"live HTTP {r.status_code}")
+        try:
+            text = r.json()["choices"][0]["message"]["content"]
+        except Exception as exc:
+            raise _LiveRequestError(f"live response unreadable: {exc.__class__.__name__}") from exc
+        if not isinstance(text, str):
+            text = "" if text is None else str(text)
+        parsed = _parse_json_decision(text)
+        if parsed:
+            return parsed
+        return {"type": "final", "content": text}
 
 
 def _parse_json_decision(text: str) -> dict[str, Any] | None:
