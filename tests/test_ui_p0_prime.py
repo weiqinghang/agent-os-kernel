@@ -10,6 +10,7 @@ from agent_os_kernel.skills.insight_report import SKILL, stub_decide
 
 scenarios(str(Path(__file__).parent / "features" / "ui_p0_prime.feature"))
 scenarios(str(Path(__file__).parent / "features" / "midflight_progress.feature"))
+scenarios(str(Path(__file__).parent / "features" / "cancel_progress.feature"))
 
 WHITELIST = {"处理中", "思考中", "正在查询数据", "正在整理结论", "等确认"}
 PROGRESS_SEQUENCE = ["处理中", "思考中", "正在查询数据", "正在整理结论"]
@@ -492,3 +493,34 @@ def no_card(world):
 @then("没有新的运行请求")
 def no_new_run(world):
     assert world["snap"]["messagePosts"] == world["posts_before_click"]
+
+
+@then("页面没有停止按钮")
+def no_stop_button(world):
+    assert world["snap"]["stopVisible"] is False
+    assert "停止" not in world["snap"]["buttons"]
+
+
+@then("已发出取消请求")
+def cancel_posted(world):
+    snap = world["snap"]
+    assert snap["cancelPosts"] == 1
+    assert "/cancel" in snap["cancelUrl"]
+    assert snap["stopVisible"] is True
+
+
+@when("后台确认已经停止")
+def ack_stopped(world):
+    _call(world, {"op": "ack-cancel"})
+
+
+@then("轮询已经停住")
+def polls_stopped(world):
+    assert world["snap"]["pollsStable"] is True
+
+
+@then("停止按钮已经收起")
+def stop_hidden(world):
+    assert world["snap"]["stopVisible"] is False
+    assert "停止" not in world["snap"]["buttons"]
+    assert world["snap"]["stripCount"] == 0

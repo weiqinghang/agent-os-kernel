@@ -1,7 +1,7 @@
 /**
  * 洞察报告助理前台。进度与脱敏都在这一层：
  * 发令后立刻放一条呼吸条带，再轮询 run_events，把白名单文案写回同一条。
- * 调试链路默认关；打开后也只显示白名单短句。
+ * 轮询期间可以停止。调试链路默认关；打开后也只显示白名单短句。
  */
 import {
   IMMEDIATE,
@@ -42,10 +42,13 @@ export function boot(doc, win) {
   const form = doc.getElementById("f");
   const inp = doc.getElementById("inp");
   const sendBtn = doc.getElementById("send");
+  const stopBtn = doc.getElementById("stop");
   const meta = doc.getElementById("meta");
   const chipsEl = doc.getElementById("chips");
 
   let sessionId = null;
+  let activeRunId = null;
+  let pendingCancel = null;
   let pendingHitl = null;
   let hasConclusion = false;
   let currentTw = { label: "近90天", start: "2025-07-25", end: "2025-10-22" };
@@ -226,7 +229,58 @@ export function boot(doc, win) {
   }
 
   function isTerminalStatus(status) {
-    return status === "completed" || status === "failed" || status === "awaiting_hitl";
+    return status === "completed" || status === "failed" || status === "awaiting_hitl" || status === "cancelled";
+  }
+
+  function showStop(runId) {
+    activeRunId = runId || null;
+    pendingCancel = null;
+    if (!stopBtn) return;
+    const on = !!activeRunId;
+    stopBtn.hidden = !on;
+    stopBtn.disabled = !on;
+  }
+
+  function hideStop() {
+    activeRunId = null;
+    pendingCancel = null;
+    if (!stopBtn) return;
+    stopBtn.hidden = true;
+    stopBtn.disabled = true;
+  }
+
+  function applyStop(view) {
+    if (!pendingCancel) return false;
+    view.status = pendingCancel.status || "cancelled";
+    view.markdown = pendingCancel.markdown || "已停止";
+    return true;
+  }
+
+  async function requestStop() {
+    const runId = activeRunId;
+    if (!runId || !stopBtn || stopBtn.hidden) return;
+    stopBtn.disabled = true;
+    try {
+      const resp = await win.fetch("/runs/" + encodeURIComponent(runId) + "/cancel", { method: "POST" });
+      const body = resp.ok ? await resp.json().catch(() => ({})) : null;
+      if (activeRunId !== runId) return;
+      if (!resp.ok || !body) {
+        stopBtn.disabled = false;
+        return;
+      }
+      pendingCancel = {
+        status: body.status || "cancelled",
+        markdown: body.markdown || body.result || "已停止",
+      };
+    } catch (_) {
+      if (activeRunId === runId && stopBtn && !stopBtn.hidden) stopBtn.disabled = false;
+    }
+  }
+
+  if (stopBtn) {
+    stopBtn.addEventListener("click", () => {
+      requestStop();
+    });
   }
 
   async function fetchEventPage(runId, afterId) {
@@ -285,38 +339,45 @@ export function boot(doc, win) {
       hitl: accepted.hitl || null,
       context_bindings: accepted.context_bindings || null,
     };
+    showStop(view.run_id);
     let after = 0;
     let events = [];
     let failedPoll = false;
     const started = Date.now();
-    while (true) {
-      if (view.run_id && !failedPoll) {
-        const page = await fetchEventPage(view.run_id, after);
-        if (!page) {
-          failedPoll = true;
-        } else {
-          const fresh = Array.isArray(page.events) ? page.events : [];
-          if (fresh.length) {
-            events = events.concat(fresh);
-            const last = fresh[fresh.length - 1];
-            if (last && typeof last.id === "number") after = last.id;
-            await playEvents(strip, events);
+    try {
+      while (true) {
+        if (applyStop(view)) break;
+        if (view.run_id && !failedPoll) {
+          const page = await fetchEventPage(view.run_id, after);
+          if (!page) {
+            failedPoll = true;
+          } else {
+            const fresh = Array.isArray(page.events) ? page.events : [];
+            if (fresh.length) {
+              events = events.concat(fresh);
+              const last = fresh[fresh.length - 1];
+              if (last && typeof last.id === "number") after = last.id;
+              await playEvents(strip, events);
+            }
+            if (page.state) view.status = page.state;
+            if (typeof page.result === "string") view.markdown = page.result;
+            if (page.hitl) view.hitl = page.hitl;
+            if (page.context_bindings) view.context_bindings = page.context_bindings;
           }
-          if (page.state) view.status = page.state;
-          if (typeof page.result === "string") view.markdown = page.result;
-          if (page.hitl) view.hitl = page.hitl;
-          if (page.context_bindings) view.context_bindings = page.context_bindings;
         }
+        if (applyStop(view)) break;
+        if (failedPoll && !isTerminalStatus(view.status)) view.status = "failed";
+        if (isTerminalStatus(view.status) || failedPoll || !view.run_id) break;
+        if (Date.now() - started >= settings.pollBudgetMs) {
+          view.status = "failed";
+          break;
+        }
+        await new Promise((r) => setTimeout(r, settings.pollMs));
       }
-      if (failedPoll && !isTerminalStatus(view.status)) view.status = "failed";
-      if (isTerminalStatus(view.status) || failedPoll || !view.run_id) break;
-      if (Date.now() - started >= settings.pollBudgetMs) {
-        view.status = "failed";
-        break;
-      }
-      await new Promise((r) => setTimeout(r, settings.pollMs));
+      renderOutcome(view, events);
+    } finally {
+      hideStop();
     }
-    renderOutcome(view, events);
   }
 
   async function ensureSession() {

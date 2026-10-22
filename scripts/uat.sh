@@ -99,7 +99,7 @@ while time.time() < deadline:
         snap = json.load(resp)
     last = snap
     state = snap.get("state")
-    if state in ("completed", "failed", "awaiting_hitl"):
+    if state in ("completed", "failed", "awaiting_hitl", "cancelled"):
         if state != "completed":
             raise SystemExit("turn " + state + ": " + str(snap.get("result"))[:400])
         out = {

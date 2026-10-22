@@ -100,7 +100,7 @@ class MessageIn(BaseModel):
 
 def _persist_assistant(session_id: str, run_id: str, result: dict[str, Any]) -> None:
     md = result.get("markdown") or result.get("message") or ""
-    if result.get("status") in ("completed", "awaiting_hitl") and md:
+    if result.get("status") in ("completed", "awaiting_hitl", "cancelled") and md:
         session.add_message(session_id, "assistant", md, run_id=run_id)
 
 
@@ -108,8 +108,11 @@ def _drive_turn(session_id: str, run_id: str, target: Any, args: tuple[Any, ...]
     try:
         result = target(*args)
     except Exception as exc:  # noqa: BLE001
-        run.set_state(run_id, "failed", result=f"编排失败：{exc}")
-        return
+        if run.cancel_requested(run_id):
+            result = {"status": "cancelled", "markdown": run.CANCELLED_RESULT}
+        else:
+            run.set_state(run_id, "failed", result=f"编排失败：{exc}")
+            return
     try:
         _persist_assistant(session_id, run_id, result or {})
     except Exception:
@@ -223,6 +226,31 @@ def resume_run(run_id: str, body: HitlResume) -> dict[str, Any]:
     accepted = _accept(rr["session_id"], run_id, rr.get("context_bindings") or {})
     accepted.pop("session_id", None)
     return accepted
+
+
+@app.post("/runs/{run_id}/cancel")
+def cancel_run(run_id: str) -> dict[str, Any]:
+    """Stop a Run that has not finished. Terminal runs, including a rejected confirm, get 409."""
+    try:
+        outcome = run.request_cancel(run_id)
+    except KeyError:
+        raise HTTPException(404, "run not found") from None
+    if not outcome["applied"]:
+        raise HTTPException(409, f"run already {outcome['state']}")
+    # The acting turn thread records the line when it leaves the loop.
+    # A Run parked on confirm has no thread left, so record it here.
+    if outcome["previous"] == "awaiting_hitl":
+        current = run.get_run(run_id) or {}
+        sid = current.get("session_id")
+        if sid:
+            session.add_message(sid, "assistant", run.CANCELLED_RESULT, run_id=run_id)
+    return {
+        "run_id": run_id,
+        "status": "cancelled",
+        "markdown": run.CANCELLED_RESULT,
+        "result": run.CANCELLED_RESULT,
+        "accepted": True,
+    }
 
 
 def _run_or_404(run_id: str) -> dict[str, Any]:

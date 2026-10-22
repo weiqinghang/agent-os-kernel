@@ -7,6 +7,10 @@ The same normalized tool name and arguments may run REPEAT_LIMIT - 1 times in
 a row. The next identical call is not executed: one decide is asked for a
 final answer, and if that is empty the run completes from tool evidence or
 fails with a loop_break signal instead of burning MAX_STEPS.
+
+Cancel is cooperative: the loop looks between decides and tool batches, lets
+the current batch finish, then leaves. It does not write model text into the
+user-facing result.
 """
 from __future__ import annotations
 
@@ -242,6 +246,27 @@ def _evidence_map(tool_results: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _should_stop(run_id: str) -> bool:
+    if run.cancel_requested(run_id):
+        return True
+    current = run.get_run(run_id)
+    return bool(current and current.get("state") == "cancelled")
+
+
+def _cancelled_result(run_id: str, bindings: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Short human close. Partial tool events already stored stay where they are."""
+    current = run.get_run(run_id) or {}
+    if current.get("state") != "cancelled":
+        run.set_state(run_id, "cancelled", result=run.CANCELLED_RESULT)
+    resolved = bindings if bindings is not None else (current.get("context_bindings") or {})
+    return {
+        "status": "cancelled",
+        "markdown": run.CANCELLED_RESULT,
+        "message": run.CANCELLED_RESULT,
+        "context_bindings": resolved,
+    }
+
+
 def _complete(
     run_id: str,
     markdown: str,
@@ -251,12 +276,15 @@ def _complete(
     loop_break: bool = False,
     repeated_tool: str = "",
 ) -> dict[str, Any]:
+    if _should_stop(run_id):
+        return _cancelled_result(run_id, bindings)
     visible = _visible_results(tool_results)
     payload: dict[str, Any] = {"state": "completed", "n_tools": len(visible)}
     if loop_break:
         payload["loop_break"] = True
         payload["repeated_tool"] = repeated_tool
-    run.set_state(run_id, "completed", result=markdown)
+    if not run.set_state(run_id, "completed", result=markdown):
+        return _cancelled_result(run_id, bindings)
     obs.emit(run_id, "state", payload)
     out: dict[str, Any] = {
         "status": "completed",
@@ -286,9 +314,12 @@ def _degraded_summary(name: str, tool_results: list[dict[str, Any]]) -> str:
 
 
 def _fail_loop(run_id: str, name: str) -> dict[str, Any]:
+    if _should_stop(run_id):
+        return _cancelled_result(run_id)
     tool = name or "tool"
     msg = f"loop_break: 连续重复调用 {tool}，没有可用工具证据"
-    run.set_state(run_id, "failed", result=msg)
+    if not run.set_state(run_id, "failed", result=msg):
+        return _cancelled_result(run_id)
     obs.emit(
         run_id,
         "state",
@@ -309,6 +340,8 @@ def _stop_for_repeat(
     repeated: dict[str, str],
 ) -> dict[str, Any]:
     """Ask once for a final answer. Do not execute the repeated call."""
+    if _should_stop(run_id):
+        return _cancelled_result(run_id, bindings)
     name = repeated.get("name") or ""
     shown = name or "tool"
     obs.emit(
@@ -374,6 +407,8 @@ def _stop_for_repeat(
                 "n_calls": len(decision.get("calls") or []) if dtype == "tool_calls" else 0,
             },
         )
+    if _should_stop(run_id):
+        return _cancelled_result(run_id, bindings)
     content = ""
     if decision is not None and decision.get("type") == "final":
         content = str(decision.get("content") or "").strip()
@@ -405,17 +440,21 @@ def handle_user_message(
     *,
     resume: bool = False,
 ) -> dict[str, Any]:
-    """Drive one user turn (or HITL resume) to completed / failed / awaiting_hitl."""
+    """Drive one user turn (or HITL resume) to completed / failed / awaiting_hitl / cancelled."""
+    if _should_stop(run_id):
+        return _cancelled_result(run_id)
     rr = run.get_run(run_id) or {}
     bindings = rr.get("context_bindings") or {}
     skill_name = bindings.get("skill") or registry.default_name()
     try:
         skill = registry.get(skill_name)
     except KeyError as e:
-        run.set_state(run_id, "failed", result=str(e))
+        if not run.set_state(run_id, "failed", result=str(e)):
+            return _cancelled_result(run_id)
         return {"status": "failed", "markdown": str(e)}
 
-    run.set_state(run_id, "acting")
+    if not run.set_state(run_id, "acting"):
+        return _cancelled_result(run_id, bindings)
     obs.emit(
         run_id,
         "state",
@@ -428,13 +467,14 @@ def handle_user_message(
                 token = hitl.make_token(kind)
                 prompts = skill.get("hitl_prompts") or {}
                 md = prompts.get(kind) or "请确认后继续。"
-                run.set_state(
+                if not run.set_state(
                     run_id,
                     "awaiting_hitl",
                     resume_token=token["resume_token"],
                     hitl_kind=kind,
                     result=md,
-                )
+                ):
+                    return _cancelled_result(run_id, bindings)
                 obs.emit(
                     run_id,
                     "hitl",
@@ -454,6 +494,8 @@ def handle_user_message(
         fingerprints: list[str] = []
         step_budget = resolve_max_steps()
         for step in range(step_budget):
+            if _should_stop(run_id):
+                return _cancelled_result(run_id, bindings)
             decision = model_broker.decide(
                 system=system,
                 messages=messages,
@@ -463,6 +505,8 @@ def handle_user_message(
                 skill_name=skill_name,
             )
             _emit_broker_events(run_id, step, decision)
+            if _should_stop(run_id):
+                return _cancelled_result(run_id, bindings)
             dtype = decision.get("type")
             obs.emit(
                 run_id,
@@ -481,12 +525,16 @@ def handle_user_message(
                 # A bad call or ToolGatewayError is recoverable: record ok:false and continue.
                 if not calls:
                     raise RuntimeError("model returned empty tool_calls")
+                if _should_stop(run_id):
+                    return _cancelled_result(run_id, bindings)
                 # Same normalized call stops before this batch spends the step budget.
                 accepted, repeated = _split_repeat(calls, fingerprints)
                 if accepted:
                     # Dogfood tools are reads, so the prefix shares the parallel bound.
                     _run_tool_batch(run_id, gw, accepted, allowed, bindings, tool_results)
                     fingerprints.extend(_call_fingerprint(call) for call in accepted)
+                if _should_stop(run_id):
+                    return _cancelled_result(run_id, bindings)
                 if repeated:
                     return _stop_for_repeat(
                         run_id,
@@ -502,17 +550,23 @@ def handle_user_message(
                 continue
 
             if dtype == "final":
+                if _should_stop(run_id):
+                    return _cancelled_result(run_id, bindings)
                 return _complete(run_id, str(decision.get("content") or ""), tool_results, bindings)
 
             raise RuntimeError(f"unknown decision type: {dtype}")
 
         msg = f"exceeded MAX_STEPS={step_budget}"
-        run.set_state(run_id, "failed", result=msg)
+        if _should_stop(run_id) or not run.set_state(run_id, "failed", result=msg):
+            return _cancelled_result(run_id, bindings)
         obs.emit(run_id, "state", {"state": "failed", "error": msg})
         return {"status": "failed", "markdown": msg}
     except Exception as e:  # noqa: BLE001
+        if _should_stop(run_id):
+            return _cancelled_result(run_id, bindings)
         msg = f"编排失败：{e}"
-        run.set_state(run_id, "failed", result=msg)
+        if not run.set_state(run_id, "failed", result=msg):
+            return _cancelled_result(run_id, bindings)
         obs.emit(run_id, "state", {"state": "failed", "error": str(e)})
         return {"status": "failed", "markdown": msg}
 

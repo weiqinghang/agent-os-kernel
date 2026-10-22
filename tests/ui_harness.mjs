@@ -47,6 +47,7 @@ const SECRETS = [
   "model_step",
   "run_created",
   "awaiting_hitl",
+  "cancelled",
   "live_fallback_stub",
   "select 1",
   "Traceback",
@@ -292,6 +293,10 @@ function installFetch(window, opts) {
   window.__bindings = null;
   window.__messagePosts = 0;
   window.__resumePosts = 0;
+  window.__cancelPosts = 0;
+  window.__cancelUrl = "";
+  window.__cancelPending = null;
+  window.__pollsStable = false;
   window.__lastRequestText = "";
   window.__runsFail = false;
   window.__runsBadJson = false;
@@ -327,6 +332,13 @@ function route(window, url, options) {
   if (method === "POST" && url.includes("/resume")) {
     window.__resumePosts += 1;
     return new Promise((resolve) => window.__pending.push({ resolve }));
+  }
+  if (method === "POST" && url.includes("/cancel")) {
+    window.__cancelPosts += 1;
+    window.__cancelUrl = url;
+    return new Promise((resolve) => {
+      window.__cancelPending = resolve;
+    });
   }
   if (method === "GET" && url.includes("/events")) {
     window.__polls = (window.__polls || 0) + 1;
@@ -414,7 +426,13 @@ function snapshot() {
     chainLines: chain ? Array.from(chain.querySelectorAll("li")).map((li) => textOf(li)) : [],
     body: textOf(doc.body),
     rebind: rebind ? rebind.textContent : "",
-    buttons: Array.from(doc.querySelectorAll("button")).map((b) => b.textContent),
+    buttons: Array.from(doc.querySelectorAll("button"))
+      .filter((b) => !b.hidden)
+      .map((b) => b.textContent),
+    stopVisible: !!(doc.getElementById("stop") && !doc.getElementById("stop").hidden),
+    cancelPosts: win.__cancelPosts || 0,
+    cancelUrl: win.__cancelUrl || "",
+    pollsStable: !!win.__pollsStable,
     chips: Array.from(doc.querySelectorAll(".chip")).map((b) => b.getAttribute("data-label")),
     datasetChips: doc.querySelectorAll("[data-dataset], .chip-focus, .focus-chip").length,
     diff: !!doc.querySelector(".diff, .compare, .side-by-side"),
@@ -547,6 +565,38 @@ async function doFinish(msg) {
   return snapshot();
 }
 
+async function doAckCancel() {
+  const win = current.win;
+  win.__events = (win.__events || []).concat(
+    stamp(win, [
+      {
+        kind: "tool_call",
+        payload: { ok: true, tool: "query_stats", thinking: "hidden-cot chain-of-thought" },
+      },
+      { kind: "phase_writing", payload: { thinking: "hidden-cot" } },
+    ])
+  );
+  const resolve = win.__cancelPending;
+  if (!resolve) throw new Error("no cancel pending");
+  resolve(
+    jsonResponse({
+      run_id: RUN_ID,
+      status: "cancelled",
+      accepted: true,
+      markdown: "已停止",
+      result: "已停止",
+    })
+  );
+  await waitUntil(() => current.doc.querySelectorAll(".progress-strip").length === 0, 800);
+  await waitUntil(() => textOf(current.doc.body).includes("已停止"), 800);
+  const stop = current.doc.getElementById("stop");
+  await waitUntil(() => !!(stop && stop.hidden), 800);
+  const polls = win.__polls || 0;
+  await wait(120);
+  win.__pollsStable = (win.__polls || 0) <= polls + 1;
+  return snapshot();
+}
+
 async function doChip(label) {
   const { doc, win } = current;
   const btn = Array.from(doc.querySelectorAll(".chip")).find((b) => b.getAttribute("data-label") === label);
@@ -580,6 +630,7 @@ async function handle(msg) {
   if (msg.op === "accept") return doAccept(msg);
   if (msg.op === "push") return doPush(msg);
   if (msg.op === "finish") return doFinish(msg);
+  if (msg.op === "ack-cancel") return doAckCancel();
   if (msg.op === "chip") return doChip(msg.label);
   if (msg.op === "click") return doClick(msg.text);
   if (msg.op === "label") return doLabel();
