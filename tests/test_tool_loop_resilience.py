@@ -281,11 +281,15 @@ def when_unknown_decision(box):
 
 @when("模型连续要求调用工具直到超过 MAX_STEPS")
 def when_max_steps(box):
-    box["monkeypatch"].setattr(
-        orchestrator.model_broker,
-        "decide",
-        lambda **kwargs: {"type": "tool_calls", "calls": [{"name": "drop_table", "arguments": {"i": 1}}]},
-    )
+    # Distinct arguments: identical repeats are stopped by the loop guard.
+    state = {"n": 0}
+
+    def decide(**kwargs):
+        del kwargs
+        state["n"] += 1
+        return {"type": "tool_calls", "calls": [{"name": "drop_table", "arguments": {"i": state["n"]}}]}
+
+    box["monkeypatch"].setattr(orchestrator.model_broker, "decide", decide)
     _run(box)
 
 
@@ -411,7 +415,7 @@ def then_failed_reason(box, snippet):
 @then("失败前每一步工具错误都已回灌")
 def then_max_steps_recorded(box):
     failed_tools = [event for event in _tool_events(box["run_id"]) if event["payload"].get("ok") is False]
-    assert len(failed_tools) == orchestrator.MAX_STEPS
+    assert len(failed_tools) == orchestrator.resolve_max_steps()
     assert all("drop_table" in (event["payload"].get("error") or "") for event in failed_tools)
 
 
