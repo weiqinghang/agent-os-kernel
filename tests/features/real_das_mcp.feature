@@ -15,6 +15,17 @@ Feature: 内核经 Bearer 调用真 DAS MCP
     When 网关调用 query_stats 并带上 sql
     Then 网关拒绝裸 SQL 且没有发出请求
 
+  Scenario: 假形状参数改写成 dataset_id 与 filters/metrics
+    Given 真 DAS MCP 已按契约接好
+    When 网关用假 DAS 形状调用 query_stats、describe_dataset 与 sample_records
+    Then 真 MCP 参数不含 name、dataset、start、end 与 metric 字符串
+    And query_stats 带上 dataset_id、时间窗 filters 与 metrics 对象
+
+  Scenario: USE_FAKE_DAS 仍按假形状出网
+    Given 假 DAS 开关已打开
+    When 网关用假形状调用 query_stats
+    Then 参数保留 name、start、end、metric 且没有 dataset_id
+
   Scenario: 聊天狗粮结论页对齐种子数据集
     Given 真 DAS MCP 已按契约接好
     When 用户让内核写一份电商洞察报告

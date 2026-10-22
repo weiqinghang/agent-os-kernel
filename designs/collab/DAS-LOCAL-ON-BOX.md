@@ -71,8 +71,22 @@ export APP_RUNTIME_ENV_FILE="$PWD/.env"
 - success body is either one JSON object or SSE `data:` lines
 - tool payload is `result.structuredContent` when it is an object; otherwise JSON inside `result.content[]`
 - missing `evidence.fingerprint` is filled by the gateway (sha256 prefix) so the conclusion page still has an anchor
-- real dataset-scoped calls also send `dataset_id` when the caller only filled `name` / bindings dataset
 - raw SQL (`sql` / `SQL` argument) is rejected before the HTTP call
+- `USE_FAKE_DAS=1` forwards fake-DAS arguments unchanged (`name`, `start`, `end`, string `metric`)
+- real MCP (`additionalProperties: false`) is normalized in `adapt_real_arguments` before POST:
+
+  | Incoming (model / bindings / fake shape) | Real argument |
+  | --- | --- |
+  | `dataset_id`, else `name`, else `dataset` | `dataset_id` (explicit `dataset_id` wins) |
+  | `start` / `end` or `time_window.start` / `end` | `filters.clauses[]` on `order_date` with `gte` / `lte` |
+  | flat `filters` `{field: value}` | `filters = {op: "and", clauses: [{field, op: "eq", value}]}` |
+  | existing `filters.clauses` or `filters.conditions` | kept, then the time window is appended if missing |
+  | string `metric` (`sum_gmv`, `sum_qty`, `avg_gmv`, `count`, `return_rate`) | `metrics = {<id>: {name, fn, field?}}` |
+  | `metrics` already an object or list | kept; the string `metric` is dropped |
+  | `group_by`, `limit` on `query_stats` | passed through |
+  | `name`, `dataset`, `start`, `end`, `time_window`, string `metric` | stripped so they are not additional properties |
+
+  `describe_dataset` / `describe_fields` / `describe_tag_hierarchies` send `dataset_id` only. `query_stats`, `search_records`, and `sample_records` also send the `filters` object (and `query_stats` sends `metrics`).
 
 Whitelist (on-box `tools/list` exposes the two describe tools, so they are allow-listed):
 

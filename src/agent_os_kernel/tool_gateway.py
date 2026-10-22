@@ -41,7 +41,134 @@ _DATASET_SCOPED = frozenset(
     }
 )
 
+# Fake-DAS argument names. Real MCP models use extra=forbid / additionalProperties: false.
+_FAKE_ARG_KEYS = frozenset({"name", "dataset", "start", "end", "time_window", "metric"})
+_FILTER_TOOLS = frozenset({"query_stats", "search_records", "sample_records"})
+_DATE_FIELD = "order_date"
+# Dogfood metric ids from the overnight fake DAS, read as a metrics object.
+_METRIC_FN: dict[str, tuple[str, str | None]] = {
+    "sum_gmv": ("sum", "gmv"),
+    "sum_qty": ("sum", "qty"),
+    "avg_gmv": ("avg", "gmv"),
+    "count": ("count", None),
+    "return_rate": ("avg", "returned"),
+}
+
 _ACCEPT = "application/json, text/event-stream"
+
+
+def _window_bounds(src: dict[str, Any]) -> tuple[Any, Any]:
+    start, end = src.get("start"), src.get("end")
+    window = src.get("time_window")
+    if isinstance(window, dict):
+        start = start or window.get("start")
+        end = end or window.get("end")
+    return start, end
+
+
+def _clauses_from_filters(filters: Any) -> list[dict[str, Any]]:
+    """Flat fake filters or an existing DSL object → clause list."""
+    if isinstance(filters, list):
+        return [clause for clause in filters if isinstance(clause, dict)]
+    if not isinstance(filters, dict):
+        return []
+    nested = filters.get("clauses")
+    if isinstance(nested, list):
+        return [clause for clause in nested if isinstance(clause, dict)]
+    nested = filters.get("conditions")
+    if isinstance(nested, list):
+        return [clause for clause in nested if isinstance(clause, dict)]
+    clauses: list[dict[str, Any]] = []
+    for field, value in filters.items():
+        if field in {"op", "logic", "and", "or"}:
+            continue
+        if isinstance(value, dict):
+            for op, val in value.items():
+                clauses.append({"field": str(field), "op": str(op), "value": val})
+        else:
+            clauses.append({"field": str(field), "op": "eq", "value": value})
+    return clauses
+
+
+def _with_window(clauses: list[dict[str, Any]], start: Any, end: Any) -> list[dict[str, Any]]:
+    seen = {(clause.get("field"), clause.get("op")) for clause in clauses}
+    out = list(clauses)
+    if start and (_DATE_FIELD, "gte") not in seen and (_DATE_FIELD, "ge") not in seen:
+        out.append({"field": _DATE_FIELD, "op": "gte", "value": start})
+    if end and (_DATE_FIELD, "lte") not in seen and (_DATE_FIELD, "le") not in seen:
+        out.append({"field": _DATE_FIELD, "op": "lte", "value": end})
+    return out
+
+
+def _filters_object(src: dict[str, Any]) -> dict[str, Any] | None:
+    start, end = _window_bounds(src)
+    clauses = _with_window(_clauses_from_filters(src.get("filters")), start, end)
+    if not clauses:
+        return None
+    return {"op": "and", "clauses": clauses}
+
+
+def _metrics_object(src: dict[str, Any]) -> Any:
+    """String `metric` → metrics object. An existing metrics dict/list wins."""
+    existing = src.get("metrics")
+    if isinstance(existing, (dict, list)) and existing:
+        return existing
+    metric = src.get("metric")
+    if isinstance(metric, dict) and metric:
+        return metric
+    if not isinstance(metric, str) or not metric.strip():
+        return None
+    name = metric.strip()
+    fn, field = _METRIC_FN.get(name, (None, None))
+    spec: dict[str, Any] = {"name": name}
+    if fn:
+        spec["fn"] = fn
+    if field:
+        spec["field"] = field
+    return {name: spec}
+
+
+def adapt_real_arguments(name: str, merged: dict[str, Any]) -> dict[str, Any]:
+    """Normalize fake-DAS / mixed args onto the real MCP argument schema.
+
+    Real tools reject unknown keys (``name``, ``dataset``, ``start``, ``end``,
+    string ``metric``). Dataset scope is ``dataset_id``. Time window and flat
+    equality filters become a ``filters`` object. A metric string becomes a
+    ``metrics`` object. ``group_by`` and ``limit`` pass through on ``query_stats``.
+
+    ``describe_*`` only receives ``dataset_id`` — those schemas do not take the
+    fake time-window keys. ``USE_FAKE_DAS`` does not call this function.
+    """
+    dataset_id = merged.get("dataset_id") or merged.get("name") or merged.get("dataset")
+    out: dict[str, Any] = {}
+    if name in _DATASET_SCOPED and dataset_id:
+        out["dataset_id"] = dataset_id
+
+    if name in _FILTER_TOOLS:
+        filters = _filters_object(merged)
+        if filters:
+            out["filters"] = filters
+    if name == "query_stats":
+        metrics = _metrics_object(merged)
+        if metrics:
+            out["metrics"] = metrics
+        if merged.get("group_by") is not None:
+            out["group_by"] = merged["group_by"]
+        if merged.get("limit") is not None:
+            out["limit"] = merged["limit"]
+    elif name == "search_records":
+        for key in ("q", "keyword", "field", "query", "limit", "offset"):
+            if merged.get(key) not in (None, ""):
+                out[key] = merged[key]
+    elif name == "sample_records":
+        for key in ("limit", "offset"):
+            if merged.get(key) is not None:
+                out[key] = merged[key]
+    elif name not in _DATASET_SCOPED:
+        for key, value in merged.items():
+            if key not in _FAKE_ARG_KEYS:
+                out[key] = value
+    return out
 
 
 class ToolGatewayError(Exception):
@@ -213,13 +340,10 @@ class ToolGateway:
         return parse_mcp_response(response)
 
     def _adapt(self, name: str, merged: dict[str, Any]) -> dict[str, Any]:
-        """Real MCP tools take dataset_id; fake DAS uses name. Fill only missing keys."""
-        if use_fake_das() or name not in _DATASET_SCOPED:
+        """Fake DAS keeps name/start/end/metric. Real MCP gets dataset_id + DSL."""
+        if use_fake_das():
             return merged
-        ds = merged.get("dataset_id") or merged.get("name") or merged.get("dataset")
-        if ds and "dataset_id" not in merged:
-            merged = {**merged, "dataset_id": ds}
-        return merged
+        return adapt_real_arguments(name, merged)
 
     def call(
         self,

@@ -24,6 +24,7 @@ from agent_os_kernel.tool_gateway import (
     WHITELIST,
     ToolGateway,
     ToolGatewayError,
+    adapt_real_arguments,
     parse_mcp_response,
     resolve_health_url,
     resolve_mcp_url,
@@ -84,6 +85,37 @@ class FakeMcp:
         return httpx.Response(200, json=payload)
 
 
+def _metric_name(args: dict) -> str | None:
+    metric = args.get("metric")
+    if isinstance(metric, str) and metric.strip():
+        return metric.strip()
+    metrics = args.get("metrics")
+    if isinstance(metrics, dict):
+        if isinstance(metrics.get("name"), str):
+            return str(metrics["name"])
+        for key, val in metrics.items():
+            if isinstance(val, dict):
+                return str(val.get("name") or key)
+    return None
+
+
+def _eq_filters(args: dict) -> dict:
+    filters = args.get("filters") or {}
+    if isinstance(filters, list):
+        clauses = filters
+    elif isinstance(filters, dict) and isinstance(filters.get("clauses"), list):
+        clauses = filters["clauses"]
+    elif isinstance(filters, dict):
+        return {k: v for k, v in filters.items() if k not in {"op", "clauses"}}
+    else:
+        return {}
+    flat: dict = {}
+    for clause in clauses:
+        if isinstance(clause, dict) and clause.get("op") == "eq" and clause.get("field"):
+            flat[clause["field"]] = clause.get("value")
+    return flat
+
+
 def _tool_payload(name: str, args: dict) -> dict:
     if name == "list_datasets":
         return {
@@ -110,14 +142,14 @@ def _tool_payload(name: str, args: dict) -> dict:
             ("channel", "sum_gmv"): "抖音电商",
             ("province", "sum_gmv"): "江苏",
             ("channel", "return_rate"): "拼多多",
-        }.get((args.get("group_by"), args.get("metric")), "其他")
+        }.get((args.get("group_by"), _metric_name(args)), "其他")
         return {
             "group_by": args.get("group_by"),
             "metric": args.get("metric"),
             "rows": [{"key": key, "value": 4242.5}],
         }
     if name in ("sample_records", "search_records"):
-        filters = args.get("filters") or {}
+        filters = _eq_filters(args)
         rec = {
             "order_id": "ORD1001",
             "category": filters.get("category", "电子产品"),
@@ -212,7 +244,12 @@ def then_bearer(mcp_world):
     )
     args = stats_call["params"]["arguments"]
     assert args["dataset_id"] == SEED
-    assert args["name"] == SEED
+    assert args["group_by"] == "category"
+    assert args["limit"] == 5
+    assert args["metrics"]["sum_gmv"]["field"] == "gmv"
+    assert {"field": "order_date", "op": "gte", "value": "2025-07-25"} in args["filters"]["clauses"]
+    for leftover in ("name", "dataset", "start", "end", "metric"):
+        assert leftover not in args
     assert "sql" not in args
 
 
@@ -236,6 +273,116 @@ def then_tools(mcp_world):
     assert "describe_fields" in mcp_world["tools"]
     assert "describe_tag_hierarchies" in mcp_world["tools"]
     assert set(SKILL["allowed_tools"]) <= WHITELIST
+
+
+@when("网关用假 DAS 形状调用 query_stats、describe_dataset 与 sample_records")
+def when_fake_shaped_real_call(mcp_world):
+    gw = ToolGateway()
+    bindings = {
+        "dataset": SEED,
+        "time_window": {"label": "近90天", "start": "2025-07-25", "end": "2025-10-22"},
+    }
+    mcp_world["adapted_stats"] = gw.call(
+        "query_stats",
+        {
+            "dataset": "not-the-id",
+            "name": SEED,
+            "start": "2025-07-25",
+            "end": "2025-10-22",
+            "group_by": "channel",
+            "metric": "return_rate",
+            "limit": 10,
+            "filters": {"channel": "抖音电商"},
+        },
+        bindings=bindings,
+    )
+    gw.call(
+        "describe_dataset",
+        {"dataset": SEED, "name": SEED, "start": "2025-07-25", "end": "2025-10-22"},
+        bindings=bindings,
+    )
+    gw.call(
+        "sample_records",
+        {"name": SEED, "limit": 5, "filters": {"category": "服装"}},
+        bindings=bindings,
+    )
+
+
+@then("真 MCP 参数不含 name、dataset、start、end 与 metric 字符串")
+def then_fake_keys_stripped(mcp_world):
+    calls = [
+        b for b in _posted(mcp_world["fake"]) if b.get("method") == "tools/call"
+    ]
+    assert calls
+    for body in calls:
+        args = body["params"]["arguments"]
+        for key in ("name", "dataset", "start", "end", "time_window", "metric"):
+            assert key not in args
+
+
+@then("query_stats 带上 dataset_id、时间窗 filters 与 metrics 对象")
+def then_real_dsl(mcp_world):
+    by_name = {
+        b["params"]["name"]: b["params"]["arguments"]
+        for b in _posted(mcp_world["fake"])
+        if b.get("method") == "tools/call"
+    }
+    stats = by_name["query_stats"]
+    assert stats["dataset_id"] == SEED
+    assert stats["group_by"] == "channel"
+    assert stats["limit"] == 10
+    assert stats["metrics"]["return_rate"] == {
+        "name": "return_rate",
+        "fn": "avg",
+        "field": "returned",
+    }
+    assert stats["filters"]["op"] == "and"
+    assert {"field": "order_date", "op": "gte", "value": "2025-07-25"} in stats["filters"]["clauses"]
+    assert {"field": "order_date", "op": "lte", "value": "2025-10-22"} in stats["filters"]["clauses"]
+    assert {"field": "channel", "op": "eq", "value": "抖音电商"} in stats["filters"]["clauses"]
+    assert by_name["describe_dataset"] == {"dataset_id": SEED}
+    sample = by_name["sample_records"]
+    assert sample["dataset_id"] == SEED
+    assert sample["limit"] == 5
+    assert {"field": "category", "op": "eq", "value": "服装"} in sample["filters"]["clauses"]
+    assert {"field": "order_date", "op": "gte", "value": "2025-07-25"} in sample["filters"]["clauses"]
+    assert mcp_world["adapted_stats"]["data"]["rows"][0]["key"] == "拼多多"
+
+
+@given("假 DAS 开关已打开", target_fixture="mcp_world")
+def given_fake_switch(monkeypatch):
+    monkeypatch.setenv("USE_FAKE_DAS", "1")
+    monkeypatch.setenv("FAKE_DAS_URL", "http://127.0.0.1:8788")
+    monkeypatch.delenv("DAS_MCP_URL", raising=False)
+    monkeypatch.delenv("DAS_MCP_AUTH_TOKEN", raising=False)
+    fake = FakeMcp()
+    _install(monkeypatch, fake)
+    return {"fake": fake}
+
+
+@when("网关用假形状调用 query_stats")
+def when_fake_shape(mcp_world):
+    ToolGateway().call(
+        "query_stats",
+        {"group_by": "province", "metric": "sum_gmv", "limit": 3},
+        bindings={
+            "dataset": SEED,
+            "time_window": {"start": "2025-07-25", "end": "2025-10-22"},
+        },
+    )
+
+
+@then("参数保留 name、start、end、metric 且没有 dataset_id")
+def then_fake_shape_kept(mcp_world):
+    args = _posted(mcp_world["fake"])[-1]["params"]["arguments"]
+    assert args["name"] == SEED
+    assert args["start"] == "2025-07-25"
+    assert args["end"] == "2025-10-22"
+    assert args["metric"] == "sum_gmv"
+    assert args["group_by"] == "province"
+    assert "dataset_id" not in args
+    assert "metrics" not in args
+    assert "filters" not in args
 
 
 @when("网关调用 query_stats 并带上 sql")
@@ -412,6 +559,120 @@ def test_fake_mode_uses_mcp_path_without_auth(monkeypatch):
     assert args["name"] == SEED
     assert args["project_id"] == "box"
     assert out["data"]["rows"][0]["key"] == "江苏"
+
+
+def test_adapt_real_argument_edges():
+    original = {
+        "dataset_id": "explicit",
+        "name": "other",
+        "dataset": "also",
+        "metric": "sum_gmv",
+        "metrics": {"custom": {"fn": "sum", "field": "gmv"}},
+        "group_by": ["category"],
+        "filters": {
+            "op": "and",
+            "clauses": [{"field": "order_date", "op": "ge", "value": "2025-01-01"}],
+        },
+        "time_window": {"start": "2025-07-25", "end": "2025-10-22"},
+    }
+    mixed = adapt_real_arguments("query_stats", original)
+    assert original["name"] == "other"
+    assert mixed["dataset_id"] == "explicit"
+    assert mixed["metrics"] == {"custom": {"fn": "sum", "field": "gmv"}}
+    assert mixed["group_by"] == ["category"]
+    assert {"field": "order_date", "op": "ge", "value": "2025-01-01"} in mixed["filters"]["clauses"]
+    assert {"field": "order_date", "op": "lte", "value": "2025-10-22"} in mixed["filters"]["clauses"]
+    assert not any(clause["op"] == "gte" for clause in mixed["filters"]["clauses"])
+    assert "metric" not in mixed
+    assert "limit" not in mixed
+
+    listed = adapt_real_arguments(
+        "list_datasets",
+        {"name": "nope", "metric": "sum_gmv", "ready_only": True, "start": "2025-01-01"},
+    )
+    assert listed == {"ready_only": True}
+
+    described = adapt_real_arguments(
+        "describe_fields",
+        {"name": SEED, "start": "2025-07-25", "end": "2025-10-22", "metric": "sum_gmv"},
+    )
+    assert described == {"dataset_id": SEED}
+    assert adapt_real_arguments("describe_tag_hierarchies", {}) == {}
+    assert adapt_real_arguments("describe_dataset", {"dataset": SEED}) == {"dataset_id": SEED}
+
+    window_only = adapt_real_arguments(
+        "search_records",
+        {
+            "dataset": SEED,
+            "time_window": {"end": "2025-10-22"},
+            "filters": [{"field": "sku", "op": "eq", "value": "耳机"}, "skip"],
+            "q": "",
+            "keyword": "耳机",
+            "query": "耳机",
+            "offset": 2,
+        },
+    )
+    assert window_only["dataset_id"] == SEED
+    assert window_only["keyword"] == "耳机"
+    assert window_only["query"] == "耳机"
+    assert window_only["offset"] == 2
+    assert "q" not in window_only
+    assert {"field": "order_date", "op": "lte", "value": "2025-10-22"} in window_only["filters"]["clauses"]
+    assert {"field": "sku", "op": "eq", "value": "耳机"} in window_only["filters"]["clauses"]
+
+    conditions = adapt_real_arguments(
+        "sample_records",
+        {
+            "name": SEED,
+            "offset": 0,
+            "filters": {
+                "conditions": [{"field": "province", "op": "eq", "value": "江苏"}, None],
+                "logic": "and",
+                "channel": {"eq": "京东"},
+            },
+        },
+    )
+    # conditions key wins over sibling flat keys
+    assert conditions["filters"]["clauses"] == [{"field": "province", "op": "eq", "value": "江苏"}]
+    assert conditions["offset"] == 0
+
+    ops = adapt_real_arguments(
+        "query_stats",
+        {
+            "dataset_id": SEED,
+            "metric": "  count  ",
+            "filters": {"gmv": {"gte": 10, "lte": 20}, "op": "and"},
+            "start": "2025-07-25",
+        },
+    )
+    assert ops["metrics"] == {"count": {"name": "count", "fn": "count"}}
+    fields = {(c["field"], c["op"]) for c in ops["filters"]["clauses"]}
+    assert ("gmv", "gte") in fields and ("gmv", "lte") in fields
+    assert ("order_date", "gte") in fields
+    assert ("order_date", "lte") not in fields
+
+    assert adapt_real_arguments("query_stats", {"dataset_id": SEED, "metrics": ["sum_gmv"], "metric": "avg_gmv"})[
+        "metrics"
+    ] == ["sum_gmv"]
+    assert adapt_real_arguments("query_stats", {"dataset_id": SEED, "metric": {"fn": "sum", "field": "gmv"}})[
+        "metrics"
+    ] == {"fn": "sum", "field": "gmv"}
+    unknown = adapt_real_arguments("query_stats", {"dataset_id": SEED, "metric": "custom_metric"})
+    assert unknown["metrics"] == {"custom_metric": {"name": "custom_metric"}}
+    assert "filters" not in adapt_real_arguments("query_stats", {"dataset_id": SEED, "metric": "  ", "filters": "nope"})
+    assert "metrics" not in adapt_real_arguments("query_stats", {"dataset_id": SEED, "metric": None})
+    kept = adapt_real_arguments(
+        "query_stats",
+        {
+            "dataset_id": SEED,
+            "filters": {"clauses": [{"field": "order_date", "op": "le", "value": "2025-10-22"}, "bad"]},
+            "end": "2025-12-01",
+            "metric": "sum_qty",
+        },
+    )
+    assert kept["metrics"]["sum_qty"] == {"name": "sum_qty", "fn": "sum", "field": "qty"}
+    assert kept["filters"]["clauses"] == [{"field": "order_date", "op": "le", "value": "2025-10-22"}]
+    assert "group_by" not in kept
 
 
 def test_url_resolution_and_probe(monkeypatch):
