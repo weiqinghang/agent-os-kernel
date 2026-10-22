@@ -18,3 +18,4 @@
 {"ts":"2026-10-23T00:31:38+08:00","from":"Grok","to":"*","action":"note","artifact":"designs/collab/2026-10-23-batch-b-parallel-tools.md","summary":"Batch B：同一次 decide 最多 3 路并行工具调用，按模型顺序写回，tool_call 带 ms","refs":[]}
 {"ts":"2026-10-23T00:41:31+08:00","from":"Grok","to":"*","action":"note","artifact":"designs/collab/2026-10-23-loop-break.md","summary":"重复工具调用第 3 次相同参数不再执行；有证据则降级完成，否则 loop_break 失败","refs":[]}
 {"ts":"2026-10-23T00:48:00+08:00","from":"Grok","to":"*","action":"note","artifact":"designs/collab/2026-10-23-batch-c-midflight.md","summary":"Batch C：回合 POST 立即返回 run_id，events 用 after_id 增量拉取，聊天条带随真实事件更新","refs":[]}
+{"ts":"2026-10-23T01:22:41+08:00","from":"Grok","to":"*","action":"note","artifact":"designs/collab/2026-10-23-batch-d-cancel.md","summary":"Batch D：进行中的 Run 可取消为 cancelled，人话收尾「已停止」；已结束再取消返回 409","refs":[]}
