@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>洞察报告助理 · Agent OS Kernel</title>
+  <title>洞察报告助理</title>
   <style>
     :root { --bg:#0f1419; --panel:#1a2332; --text:#e7ecf3; --muted:#8b9bb4; --accent:#3b82f6; --user:#1e3a5f; --bot:#243044; --chip:#1e293b; --chip-on:#1d4ed8; }
     * { box-sizing: border-box; }
@@ -29,6 +29,12 @@
     input[type=text] { flex:1; background:#0d1117; border:1px solid #2a3548; color:var(--text); padding:10px 12px; border-radius:8px; font-size:14px; }
     button { background:var(--accent); color:#fff; border:0; padding:10px 18px; border-radius:8px; cursor:pointer; font-weight:600; }
     button:disabled { opacity:0.5; cursor:not-allowed; }
+    .progress-strip { align-self:flex-start; display:flex; align-items:center; gap:10px; padding:10px 14px; border-radius:999px; background:var(--bot); border:1px solid #2a3548; max-width:860px; }
+    .progress-breathe { width:8px; height:8px; border-radius:50%; background:#93c5fd; animation:breathe 1.2s ease-in-out infinite; }
+    .progress-text { font-size:14px; }
+    @keyframes breathe { 0%,100% { opacity:.35; transform:scale(.85); } 50% { opacity:1; transform:scale(1); } }
+    @media (prefers-reduced-motion: reduce) { .progress-breathe { animation:none; opacity:1; } }
+    .debug-toggle { margin-left:auto; font-size:11px; color:var(--muted); display:flex; align-items:center; gap:4px; user-select:none; }
     .hitl { margin-top:8px; }
     .hitl button { background:#22c55e; margin-right:8px; }
     .rebind { margin-top:8px; padding:8px 10px; background:#0d1117; border-radius:8px; border:1px solid #334155; font-size:13px; }
@@ -52,7 +58,11 @@
 <body>
   <header>
     <h1>洞察报告助理</h1>
-    <span class="meta" id="meta">初始化中…</span>
+    <span class="meta" id="meta">时间窗 近90天</span>
+    <label class="debug-toggle" for="debug-chain">
+      <input id="debug-chain" type="checkbox" />
+      调试
+    </label>
   </header>
   <div id="msgs"></div>
   <div class="composer">
@@ -67,6 +77,6 @@
       <button type="submit" id="send">发送</button>
     </form>
   </div>
-  <script src="/static/app.js"></script>
+  <script type="module" src="/static/app.js"></script>
 </body>
 </html>
