@@ -25,3 +25,4 @@
 {"ts":"2026-10-23T02:03:56+08:00","from":"Grok","to":"*","action":"note","artifact":"designs/collab/2026-10-23-p0prime-chat-nits.md","summary":"P0′ 四条聊天小修：依据按钮不冒第5条、确认留下用户气泡、调试入口改 ?debug=1、收尾文案认 late model_step","refs":[]}
 {"ts":"2026-10-23T02:05:00+08:00","from":"Grok","to":"*","action":"note","artifact":"designs/collab/2026-10-23-batch-g-plan.md","summary":"Batch G：insight 声明五条中文计划；acting 只抄一次 plan；大纲正文同源；计划卡静态未开始","refs":["designs/2026-10-23-insight-plan-visibility.md"]}
 {"ts":"2026-10-23T02:30:31+08:00","from":"Grok","to":"*","action":"note","artifact":"designs/collab/2026-10-23-failed-run-retry.md","summary":"失败 Run 用新 Run 重试：深拷贝失败快照，旧 Run 保持 failed，resume 仍只处理确认","refs":[]}
+{"ts":"2026-10-23T03:20:00+08:00","from":"Grok","to":"*","action":"note","artifact":"designs/collab/2026-10-23-batch-g1-plan-progress.md","summary":"G.1：计划卡状态由 App 按计数和文案通配计算；编排仍只发一条全 pending 的 plan，不做 P3","refs":["designs/2026-10-23-plan-card-progress.md"]}

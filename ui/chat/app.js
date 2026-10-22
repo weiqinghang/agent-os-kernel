@@ -5,6 +5,7 @@
  */
 import {
   IMMEDIATE,
+  PLAN_STATUS_TEXT,
   debugLines,
   presentAssistant,
   project,
@@ -176,8 +177,8 @@ export function boot(doc, win) {
   }
 
   function paintPlan(events) {
-    const labels = projectPlan(events);
-    if (!labels) return;
+    const steps = projectPlan(events);
+    if (!steps) return;
     let card = doc.querySelector(".plan-card.is-current");
     if (!card) {
       card = doc.createElement("details");
@@ -195,9 +196,20 @@ export function boot(doc, win) {
     }
     const list = card.querySelector(".plan-steps");
     list.replaceChildren();
-    labels.forEach((label) => {
+    steps.forEach((step) => {
       const li = doc.createElement("li");
-      li.textContent = label;
+      const word = PLAN_STATUS_TEXT[step.status] || "";
+      if (word) li.setAttribute("data-status", step.status);
+      const label = doc.createElement("span");
+      label.className = "plan-label";
+      label.textContent = step.label;
+      li.appendChild(label);
+      if (word) {
+        const mark = doc.createElement("span");
+        mark.className = "plan-status";
+        mark.textContent = word;
+        li.appendChild(mark);
+      }
       list.appendChild(li);
     });
     msgs.scrollTop = msgs.scrollHeight;
@@ -338,6 +350,11 @@ export function boot(doc, win) {
   }
 
   function renderOutcome(view, events) {
+    const shown =
+      view && view.status === "cancelled"
+        ? (events || []).concat([{ kind: "state", payload: { state: "cancelled" } }])
+        : events;
+    paintPlan(shown);
     settlePlan();
     clearProgress();
     const status = view.status;

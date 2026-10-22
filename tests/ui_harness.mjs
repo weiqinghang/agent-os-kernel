@@ -270,7 +270,7 @@ function hitlEvents() {
     { kind: "state", payload: { state: "acting" } },
     { kind: "state", payload: { state: "awaiting_hitl", hitl_kind: "outline_confirm" } },
     { kind: "hitl", payload: { kind: "outline_confirm", auto: false, resume_token: TOKEN } },
-    { kind: "tool_call", payload: { tool: "query_stats", name: "query_stats" } },
+    { kind: "tool_call", payload: { ok: true, tool: "query_stats", name: "query_stats" } },
   ];
 }
 
@@ -556,7 +556,15 @@ function snapshot() {
     imgCount: doc.querySelectorAll("img").length,
     leaks: findLeaks(visibleBlob(doc)),
     planCount: doc.querySelectorAll(".plan-card").length,
-    planLabels: Array.from(doc.querySelectorAll(".plan-card li")).map((li) => textOf(li)),
+    planLabels: Array.from(doc.querySelectorAll(".plan-card li")).map((li) => {
+      const label = li.querySelector(".plan-label");
+      return label ? textOf(label) : textOf(li);
+    }),
+    planStatuses: Array.from(doc.querySelectorAll(".plan-card li")).map((li) => li.getAttribute("data-status") || ""),
+    planStatusText: Array.from(doc.querySelectorAll(".plan-card li")).map((li) => {
+      const el = li.querySelector(".plan-status");
+      return el ? textOf(el) : "";
+    }),
     planOpen: Array.from(doc.querySelectorAll(".plan-card")).map((card) => !!card.open),
     planSummary: Array.from(doc.querySelectorAll(".plan-card summary")).map((el) => textOf(el)),
     planTag: (doc.querySelector(".plan-card") || {}).tagName || "",
@@ -648,7 +656,10 @@ async function doAccept(msg) {
 }
 
 function pushEvents(kind) {
-  if (kind === "tool") return [{ kind: "tool_call", payload: { ok: true } }];
+  if (kind === "tool") return [{ kind: "tool_call", payload: { ok: true, tool: "search_records" } }];
+  if (kind === "failtool") {
+    return [{ kind: "tool_call", payload: { ok: false, tool: "query_stats", name: "sample_records" } }];
+  }
   if (kind === "writing") {
     return [
       {
@@ -684,7 +695,7 @@ function pushEvents(kind) {
 }
 
 function progressExpect(kind) {
-  if (kind === "tool") return "正在查询数据";
+  if (kind === "tool" || kind === "failtool") return "正在查询数据";
   if (kind === "writing") return "正在整理结论";
   return "思考中";
 }
@@ -696,6 +707,35 @@ async function doPush(msg) {
     win.__events = (win.__events || []).concat(stamp(win, planFixtureEvents()));
     await waitUntil(() => (win.__polls || 0) > polls, 800);
     await waitUntil(() => current.doc.querySelectorAll(".plan-card li").length >= 5, 800);
+    return snapshot();
+  }
+  if (msg.kind === "conclusion") {
+    const polls = win.__polls || 0;
+    win.__events = (win.__events || []).concat(
+      stamp(win, [
+        {
+          kind: "plan",
+          payload: {
+            revision: 1,
+            steps: [
+              { id: "scope", label: "确认这次要看的范围", status: "done" },
+              { id: "write", label: "整理结论", status: "pending" },
+            ],
+          },
+        },
+      ])
+    );
+    await waitUntil(() => (win.__polls || 0) > polls, 800);
+    await waitUntil(() => textOf(current.doc.body).includes("整理结论"), 800);
+    return snapshot();
+  }
+  if (msg.kind === "stopped") {
+    const polls = win.__polls || 0;
+    win.__events = (win.__events || []).concat(
+      stamp(win, [{ kind: "state", payload: { state: "cancelled" } }])
+    );
+    await waitUntil(() => (win.__polls || 0) > polls, 800);
+    await waitUntil(() => textOf(current.doc.body).includes("跳过"), 800);
     return snapshot();
   }
   const before = win.__polls || 0;
