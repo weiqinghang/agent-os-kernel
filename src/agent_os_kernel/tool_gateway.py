@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 import re
+import threading
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -92,6 +93,9 @@ _METRIC_SPEC: dict[str, dict[str, str]] = {
 }
 # None = catalog not loaded. Empty dict = loaded, no name→id rows.
 _DATASET_CATALOG: dict[str, str] | None = None
+# Parallel tool calls share this cache. The lock covers the fill so one
+# failure cannot wipe a catalog another call just stored.
+_CATALOG_LOCK = threading.RLock()
 
 _ACCEPT = "application/json, text/event-stream"
 
@@ -99,7 +103,8 @@ _ACCEPT = "application/json, text/event-stream"
 def clear_dataset_id_cache() -> None:
     """Drop the process-local dataset_name → dataset_id catalog."""
     global _DATASET_CATALOG
-    _DATASET_CATALOG = None
+    with _CATALOG_LOCK:
+        _DATASET_CATALOG = None
 
 
 def _is_uuid(value: str) -> bool:
@@ -577,15 +582,16 @@ class ToolGateway:
 
     def _dataset_catalog(self) -> dict[str, str]:
         global _DATASET_CATALOG
-        if _DATASET_CATALOG is not None:
+        with _CATALOG_LOCK:
+            if _DATASET_CATALOG is not None:
+                return _DATASET_CATALOG
+            try:
+                listed = self.call("list_datasets", {})
+            except ToolGatewayError:
+                _DATASET_CATALOG = {}
+                return _DATASET_CATALOG
+            _DATASET_CATALOG = index_dataset_ids(listed.get("data") or {})
             return _DATASET_CATALOG
-        try:
-            listed = self.call("list_datasets", {})
-        except ToolGatewayError:
-            _DATASET_CATALOG = {}
-            return _DATASET_CATALOG
-        _DATASET_CATALOG = index_dataset_ids(listed.get("data") or {})
-        return _DATASET_CATALOG
 
     def _resolve_dataset_id(self, name: str, merged: dict[str, Any]) -> dict[str, Any]:
         """Friendly dataset_name → UUID via one cached list_datasets call."""
