@@ -1,6 +1,8 @@
 """Model broker: decide() — live OpenAI-compat or StubBackend (Skill fixtures).
 
-Broker stays free of dogfood business copy; stub plans live in Skill modules.
+Live chat/completions sends a tools array and replays tool_results as tool-role
+messages. Providers that only put a JSON decision in message content still parse.
+Stub plans live in Skill modules. Broker stays free of dogfood business copy.
 """
 from __future__ import annotations
 
@@ -12,6 +14,124 @@ from typing import Any
 LIVE_RETRY_BACKOFF_S = 0.2
 _LIVE_ATTEMPTS = 2
 _ERROR_LIMIT = 160
+_TOOL_TEXT_LIMIT = 12000
+
+_DATASET_ID: dict[str, Any] = {"type": "string", "description": "数据集 UUID，或网关能解析的名字"}
+_FILTERS: dict[str, Any] = {
+    "type": "array",
+    "description": "过滤条件。时间窗用 order_date 的 gte 与 lte。",
+    "items": {
+        "type": "object",
+        "properties": {
+            "field": {"type": "string"},
+            "operator": {"type": "string"},
+            "value": {"description": "比较值"},
+        },
+        "required": ["field", "operator"],
+        "additionalProperties": False,
+    },
+}
+_METRICS: dict[str, Any] = {
+    "type": "array",
+    "description": "聚合项。function 为 sum、avg、count 等。",
+    "items": {
+        "type": "object",
+        "properties": {
+            "function": {"type": "string"},
+            "field": {"type": "string"},
+            "alias": {"type": "string"},
+        },
+        "required": ["function"],
+        "additionalProperties": False,
+    },
+}
+_GROUP_BY: dict[str, Any] = {
+    "type": "array",
+    "items": {"type": "string"},
+    "description": "分组字段名",
+}
+
+# Live argument shape already accepted by the gateway. Not a provider catalog.
+_TOOL_CATALOG: dict[str, dict[str, Any]] = {
+    "list_datasets": {
+        "description": "列出可查询的数据集",
+        "parameters": {
+            "type": "object",
+            "properties": {"query": {"type": "string"}},
+            "additionalProperties": False,
+        },
+    },
+    "describe_dataset": {
+        "description": "查看数据集概览",
+        "parameters": {
+            "type": "object",
+            "properties": {"dataset_id": _DATASET_ID},
+            "additionalProperties": False,
+        },
+    },
+    "describe_fields": {
+        "description": "查看字段定义。只传 dataset_id，需要时再传 field_names。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "dataset_id": _DATASET_ID,
+                "field_names": {"type": "array", "items": {"type": "string"}},
+            },
+            "additionalProperties": False,
+        },
+    },
+    "describe_tag_hierarchies": {
+        "description": "查看标签层级。参数只给 dataset_id。",
+        "parameters": {
+            "type": "object",
+            "properties": {"dataset_id": _DATASET_ID},
+            "additionalProperties": False,
+        },
+    },
+    "query_stats": {
+        "description": "按过滤、聚合和分组查询统计。不要传 SQL。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "dataset_id": _DATASET_ID,
+                "filters": _FILTERS,
+                "metrics": _METRICS,
+                "group_by": _GROUP_BY,
+                "limit": {"type": "integer"},
+            },
+            "additionalProperties": False,
+        },
+    },
+    "search_records": {
+        "description": "按条件检索记录。return_fields 不要留空。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "dataset_id": _DATASET_ID,
+                "filters": _FILTERS,
+                "return_fields": {"type": "array", "items": {"type": "string"}},
+                "evidence_preset": {"type": "string"},
+                "limit": {"type": "integer"},
+            },
+            "additionalProperties": False,
+        },
+    },
+    "sample_records": {
+        "description": "抽取记录样本。return_fields 不要留空。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "dataset_id": _DATASET_ID,
+                "filters": _FILTERS,
+                "return_fields": {"type": "array", "items": {"type": "string"}},
+                "evidence_preset": {"type": "string"},
+                "limit": {"type": "integer"},
+                "sample_strategy": {"type": "string"},
+            },
+            "additionalProperties": False,
+        },
+    },
+}
 
 
 class _LiveRequestError(Exception):
@@ -25,6 +145,12 @@ def _short_error(exc: BaseException, limit: int = _ERROR_LIMIT) -> str:
     if len(text) > limit:
         return text[: limit - 1] + "…"
     return text
+
+
+def _clip(text: str, limit: int = _TOOL_TEXT_LIMIT) -> str:
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1] + "…"
 
 
 def has_llm() -> bool:
@@ -110,6 +236,152 @@ def decide(
     )
 
 
+def _tool_specs(allowed_tools: list[str]) -> list[dict[str, Any]]:
+    specs: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for name in allowed_tools:
+        if not isinstance(name, str) or not name or name in seen:
+            continue
+        seen.add(name)
+        known = _TOOL_CATALOG.get(name)
+        if known is None:
+            description = name
+            parameters: dict[str, Any] = {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": True,
+            }
+        else:
+            description = str(known["description"])
+            parameters = known["parameters"]
+        specs.append(
+            {
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "description": description,
+                    "parameters": parameters,
+                },
+            }
+        )
+    return specs
+
+
+def _history_note(result: dict[str, Any]) -> str:
+    error = result.get("error")
+    if error:
+        return str(error)
+    name = result.get("name")
+    if name:
+        return str(name)
+    return "tool result"
+
+
+def _tool_content(result: dict[str, Any]) -> str:
+    payload: dict[str, Any] = {"ok": bool(result.get("ok"))}
+    if result.get("error"):
+        payload["error"] = result.get("error")
+    if result.get("data") is not None:
+        payload["data"] = result["data"]
+    if result.get("evidence") is not None:
+        payload["evidence"] = result["evidence"]
+    return _clip(json.dumps(payload, ensure_ascii=False))
+
+
+def _chat_messages(
+    system: str,
+    messages: list[dict[str, Any]],
+    tool_results: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    chat: list[dict[str, Any]] = [{"role": "system", "content": system}]
+    for message in messages:
+        role = message.get("role") or "user"
+        if role not in ("user", "assistant", "system"):
+            role = "user"
+        chat.append({"role": role, "content": str(message.get("content") or "")})
+    for index, result in enumerate(tool_results):
+        if not isinstance(result, dict):
+            continue
+        name = result.get("name")
+        name_text = name if isinstance(name, str) else ""
+        # loop_break and nameless rows are not functions the provider advertised.
+        if result.get("loop_break") or not name_text or name_text.startswith("_"):
+            chat.append({"role": "user", "content": _clip(_history_note(result))})
+            continue
+        arguments = result.get("arguments")
+        if not isinstance(arguments, dict):
+            arguments = {}
+        call_id = f"call_{index}"
+        chat.append(
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": call_id,
+                        "type": "function",
+                        "function": {
+                            "name": name_text,
+                            "arguments": json.dumps(arguments, ensure_ascii=False),
+                        },
+                    }
+                ],
+            }
+        )
+        chat.append(
+            {
+                "role": "tool",
+                "tool_call_id": call_id,
+                "content": _tool_content(result),
+            }
+        )
+    return chat
+
+
+def _coerce_arguments(raw: Any) -> Any:
+    if isinstance(raw, dict):
+        return raw
+    if raw is None or raw == "":
+        return {}
+    if isinstance(raw, str):
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return raw
+        return parsed
+    return raw
+
+
+def _native_calls(message: dict[str, Any]) -> list[dict[str, Any]] | None:
+    raw = message.get("tool_calls")
+    if not isinstance(raw, list) or not raw:
+        return None
+    calls: list[dict[str, Any]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        function = item.get("function")
+        if not isinstance(function, dict):
+            continue
+        name = function.get("name")
+        calls.append(
+            {
+                "name": name if isinstance(name, str) else "",
+                "arguments": _coerce_arguments(function.get("arguments")),
+            }
+        )
+    return calls or None
+
+
+def _message_text(message: dict[str, Any]) -> str:
+    text = message.get("content")
+    if isinstance(text, str):
+        return text
+    if text is None:
+        return ""
+    return str(text)
+
+
 class _LiveBackend:
     @staticmethod
     def decide(
@@ -126,39 +398,22 @@ class _LiveBackend:
             "https://api.x.ai/v1" if os.getenv("XAI_API_KEY") else "https://api.openai.com/v1"
         )
         model = os.getenv("MODEL_NAME") or "grok-2-latest"
-
-        chat_msgs: list[dict[str, str]] = [{"role": "system", "content": system}]
-        for m in messages:
-            role = m.get("role") or "user"
-            if role not in ("user", "assistant", "system"):
-                role = "user"
-            chat_msgs.append({"role": role, "content": str(m.get("content") or "")})
-        if tool_results:
-            chat_msgs.append(
-                {
-                    "role": "user",
-                    "content": "工具结果（只用这些数字，勿臆造）:\n"
-                    + json.dumps(tool_results, ensure_ascii=False)[:12000],
-                }
-            )
-        chat_msgs.append(
-            {
-                "role": "user",
-                "content": (
-                    "请以 JSON 回复，二选一：\n"
-                    '{"type":"tool_calls","calls":[{"name":"...","arguments":{...}}]}\n'
-                    '或 {"type":"final","content":"markdown..."}\n'
-                    f"允许工具: {allowed_tools}"
-                ),
-            }
-        )
+        body: dict[str, Any] = {
+            "model": model,
+            "messages": _chat_messages(system, messages, tool_results),
+            "temperature": 0.2,
+        }
+        tools = _tool_specs(allowed_tools)
+        if tools:
+            body["tools"] = tools
+            body["tool_choice"] = "auto"
 
         try:
             with httpx.Client(timeout=60.0) as client:
                 r = client.post(
                     f"{base.rstrip('/')}/chat/completions",
                     headers={"Authorization": f"Bearer {key}"},
-                    json={"model": model, "messages": chat_msgs, "temperature": 0.2},
+                    json=body,
                 )
         except Exception as exc:
             detail = " ".join(str(exc).split()) or exc.__class__.__name__
@@ -166,11 +421,15 @@ class _LiveBackend:
         if r.status_code != 200:
             raise _LiveRequestError(f"live HTTP {r.status_code}")
         try:
-            text = r.json()["choices"][0]["message"]["content"]
+            message = r.json()["choices"][0]["message"]
         except Exception as exc:
             raise _LiveRequestError(f"live response unreadable: {exc.__class__.__name__}") from exc
-        if not isinstance(text, str):
-            text = "" if text is None else str(text)
+        if not isinstance(message, dict):
+            raise _LiveRequestError("live response unreadable: message")
+        calls = _native_calls(message)
+        if calls:
+            return {"type": "tool_calls", "calls": calls}
+        text = _message_text(message)
         parsed = _parse_json_decision(text)
         if parsed:
             return parsed

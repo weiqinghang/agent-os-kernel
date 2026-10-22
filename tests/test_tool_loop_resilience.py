@@ -492,7 +492,15 @@ def test_live_parse_targets_and_unreadable_body(box):
 
     def handler(request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content.decode())
-        captured.append({"url": str(request.url), "model": body["model"], "messages": body["messages"]})
+        captured.append(
+            {
+                "url": str(request.url),
+                "model": body["model"],
+                "messages": body["messages"],
+                "tools": body.get("tools"),
+                "tool_choice": body.get("tool_choice"),
+            }
+        )
         item = queue.pop(0)
         if isinstance(item, Exception):
             raise item
@@ -538,7 +546,10 @@ def test_live_parse_targets_and_unreadable_body(box):
     assert captured[-1]["url"] == "http://models.test/v1/chat/completions"
     assert captured[-1]["model"] == "demo-model"
     assert box["sleeps"] == []
-    assert any(message["role"] == "user" and "short" in message["content"] for message in captured[-1]["messages"])
+    assert captured[-1]["tool_choice"] == "auto"
+    assert captured[-1]["tools"][0]["function"]["name"] == "list_datasets"
+    assert any(message["role"] == "tool" and "short" in message["content"] for message in captured[-1]["messages"])
+    assert not any("请以 JSON" in str(message.get("content") or "") for message in captured[-1]["messages"])
     assert any(message["content"] == "hidden" and message["role"] == "user" for message in captured[-1]["messages"])
 
     loose = decide_once(
@@ -587,6 +598,8 @@ def test_live_parse_targets_and_unreadable_body(box):
     )
     assert recovered["type"] == "final"
     assert recovered["content"] == '{"type":"nope"}'
+    assert captured[-1]["tools"] is None
+    assert captured[-1]["tool_choice"] is None
     assert recovered["_broker_events"][0]["type"] == "live_retry"
     assert recovered["_broker_events"][0]["error"].endswith("…")
     assert len(recovered["_broker_events"][0]["error"]) <= 160
