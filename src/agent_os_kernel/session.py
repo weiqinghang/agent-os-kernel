@@ -72,12 +72,23 @@ def add_message(session_id: str, role: str, content: str, run_id: str | None = N
 
 
 def list_messages(session_id: str, limit: int = 50) -> list[dict[str, Any]]:
+    """Newest `limit` messages, still in chronological order.
+
+    The broker length policy trims further. This window is what keeps the
+    latest user turn available once a thread is longer than `limit`.
+    """
+    cap = limit if isinstance(limit, int) and limit > 0 else 50
     with obs._conn() as c:
         rows = c.execute(
-            "SELECT role, content, created_at, run_id FROM messages WHERE session_id=? ORDER BY id LIMIT ?",
-            (session_id, limit),
+            """
+            SELECT role, content, created_at, run_id FROM messages
+            WHERE session_id=?
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (session_id, cap),
         ).fetchall()
-    return [dict(r) for r in rows]
+    return [dict(row) for row in reversed(rows)]
 
 
 def latest_run_id(session_id: str) -> str | None:

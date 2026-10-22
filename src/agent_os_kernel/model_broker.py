@@ -3,6 +3,10 @@
 Live chat/completions sends a tools array and replays tool_results as tool-role
 messages. Providers that only put a JSON decision in message content still parse.
 Stub plans live in Skill modules. Broker stays free of dogfood business copy.
+
+Before either backend runs, context.fit_context applies the length budget.
+Under the budget the message list is unchanged, so the tools / tool-role shape
+stays as Batch F left it.
 """
 from __future__ import annotations
 
@@ -10,6 +14,8 @@ import json
 import os
 import time
 from typing import Any
+
+from . import context
 
 LIVE_RETRY_BACKOFF_S = 0.2
 _LIVE_ATTEMPTS = 2
@@ -165,6 +171,39 @@ def model_mode() -> str:
     return "live" if has_llm() else "stub"
 
 
+def _context_event(fitted: dict[str, Any]) -> dict[str, Any] | None:
+    if not fitted.get("truncated"):
+        return None
+    event: dict[str, Any] = {
+        "type": "context_truncated",
+        "ok": True,
+        "dropped_messages": fitted["dropped_messages"],
+        "dropped_tool_results": fitted["dropped_tool_results"],
+        "shrunk_tool_results": fitted["shrunk_tool_results"],
+        "kept_messages": fitted["kept_messages"],
+        "kept_tool_results": fitted["kept_tool_results"],
+        "max_chars": fitted["max_chars"],
+        "max_messages": fitted["max_messages"],
+        "original_chars": fitted["original_chars"],
+        "kept_chars": fitted["kept_chars"],
+    }
+    fingerprint = fitted.get("bindings_fingerprint")
+    if fingerprint:
+        event["bindings_fingerprint"] = fingerprint
+    return event
+
+
+def _attach_context_events(decision: dict[str, Any], events: list[dict[str, Any]]) -> dict[str, Any]:
+    if not events:
+        return decision
+    prior = decision.get("_broker_events")
+    merged = list(events)
+    if isinstance(prior, list):
+        merged.extend(item for item in prior if isinstance(item, dict))
+    decision["_broker_events"] = merged
+    return decision
+
+
 def decide(
     *,
     system: str,
@@ -177,8 +216,21 @@ def decide(
     """Return structured decision: tool_calls | final."""
     bindings = bindings or {}
     skill_name = skill_name or bindings.get("skill") or "insight_report"
+    fitted = context.fit_context(
+        system=system,
+        messages=messages,
+        tool_results=tool_results,
+        bindings=bindings,
+    )
+    system = fitted["system"]
+    messages = fitted["messages"]
+    tool_results = fitted["tool_results"]
+    prefix: list[dict[str, Any]] = []
+    truncated = _context_event(fitted)
+    if truncated is not None:
+        prefix.append(truncated)
     if has_llm():
-        events: list[dict[str, Any]] = []
+        events: list[dict[str, Any]] = list(prefix)
         live: dict[str, Any] | None = None
         last_error = "live request failed"
         for attempt in range(1, _LIVE_ATTEMPTS + 1):
@@ -226,13 +278,16 @@ def decide(
         if events:
             live["_broker_events"] = events
         return live
-    return _StubBackend.decide(
-        system=system,
-        messages=messages,
-        allowed_tools=allowed_tools,
-        tool_results=tool_results,
-        bindings=bindings,
-        skill_name=skill_name,
+    return _attach_context_events(
+        _StubBackend.decide(
+            system=system,
+            messages=messages,
+            allowed_tools=allowed_tools,
+            tool_results=tool_results,
+            bindings=bindings,
+            skill_name=skill_name,
+        ),
+        prefix,
     )
 
 
