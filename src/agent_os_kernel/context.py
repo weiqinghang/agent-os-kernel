@@ -172,9 +172,11 @@ def compose_system(manifest_prompt: str, bindings: dict[str, Any]) -> str:
         + "\n\nWhen tool arguments omit dataset or time_window, use the bindings above."
         + " Real DAS calls use a UUID dataset_id, a filters array"
         + " ({field, operator, value}), a metrics array ({function, field, alias}),"
-        + " and a group_by array. The gateway rewrites leftover"
-        + " name/dataset/start/end/metric keys and resolves a dataset name"
-        + " through list_datasets."
+        + " and a group_by array. sample_records and search_records need a"
+        + " non-empty return_fields list, or evidence_preset \"default\"."
+        + " The gateway rewrites leftover name/dataset/start/end/metric keys,"
+        + " fills ecommerce return_fields when that projection is omitted,"
+        + " and resolves a dataset name through list_datasets."
     )
 
 

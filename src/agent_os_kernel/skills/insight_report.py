@@ -20,6 +20,9 @@ SKILL: dict[str, Any] = {
         " filters 是 {field, operator, value} 数组，时间窗用 order_date 的 gte/lte；"
         " metrics 是 {function, field, alias} 数组（function 为 sum/avg/count 等）；"
         " group_by 是字段名数组。不要传 name、dataset、start、end 或 metric 字符串。"
+        " sample_records / search_records 要带非空 return_fields"
+        "（order_id、sku、category、channel、province、order_date、qty、gmv、returned）；"
+        "缺省时网关会补上这组字段。数据集已发布默认证据字段时也可传 evidence_preset 为 default。"
         "用户要下钻某条发现的依据时，调用 sample_records 或 search_records。"
     ),
     "allowed_tools": [

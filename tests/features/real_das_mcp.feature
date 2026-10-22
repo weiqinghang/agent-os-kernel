@@ -27,6 +27,16 @@ Feature: 内核经 Bearer 调用真 DAS MCP
     When 网关用友好名两次调用 query_stats 并用 UUID 再调用一次
     Then 只请求了一次 list_datasets 且 query_stats 的 dataset_id 都是该 UUID
 
+  Scenario: sample_records 与 search_records 缺省时注入 return_fields
+    Given 真 DAS MCP 已按契约接好
+    When 网关调用 sample_records 与 search_records 的返回字段组合
+    Then 缺省 return_fields 被补成狗粮字段且显式投影被保留
+
+  Scenario: USE_FAKE_DAS 的 sample_records 不注入 return_fields
+    Given 假 DAS 开关已打开
+    When 网关用假形状调用 sample_records
+    Then 假 sample_records 保留 name 且没有 return_fields
+
   Scenario: USE_FAKE_DAS 仍按假形状出网
     Given 假 DAS 开关已打开
     When 网关用假形状调用 query_stats
