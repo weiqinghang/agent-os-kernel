@@ -19,7 +19,7 @@ const SESSION_ID = "ses_abc123def456";
 const RUN_ID = "run_3cbdbe50347f";
 const TOKEN = "hitl_0123456789abcdef";
 
-settings.replayMs = 0;
+settings.replayMs = 1;
 
 const SECRETS = [
   "query_stats",
@@ -211,7 +211,7 @@ function releaseSpec(kind) {
   }
   if (kind === "rejected") {
     return {
-      body: { run_id: RUN_ID, status: "failed", markdown: "已拒绝" },
+      body: { status: "failed", markdown: "已拒绝" },
       events: [{ kind: "hitl", payload: { approved: false, resume_token: TOKEN } }],
     };
   }
@@ -276,6 +276,12 @@ function route(window, url, options) {
   return Promise.resolve(jsonResponse({}, 404));
 }
 
+function textOf(el) {
+  if (!el) return "";
+  if (typeof el.innerText === "string") return el.innerText;
+  return el.textContent || "";
+}
+
 function findLeaks(text) {
   const found = [];
   for (const secret of SECRETS) {
@@ -287,9 +293,9 @@ function findLeaks(text) {
 }
 
 function visibleBlob(doc) {
-  const parts = [doc.body ? doc.body.innerText : ""];
+  const parts = [textOf(doc.body)];
   doc.querySelectorAll(".progress-strip, .chain, .rebind, .hitl, .msg, #meta").forEach((el) => {
-    parts.push(el.innerHTML);
+    parts.push(el.innerHTML, textOf(el));
   });
   return parts.join("\n");
 }
@@ -310,8 +316,9 @@ function snapshot() {
     breathe: !!(strip && strip.querySelector(".progress-breathe")),
     styleHasBreathe: !!(style && /@keyframes\s+breathe/.test(style.textContent)),
     chain: !!chain,
-    chainText: chain ? chain.innerText : "",
-    body: doc.body.innerText,
+    chainText: chain ? textOf(chain) : "",
+    chainLines: chain ? Array.from(chain.querySelectorAll("li")).map((li) => textOf(li)) : [],
+    body: textOf(doc.body),
     rebind: rebind ? rebind.textContent : "",
     buttons: Array.from(doc.querySelectorAll("button")).map((b) => b.textContent),
     chips: Array.from(doc.querySelectorAll(".chip")).map((b) => b.getAttribute("data-label")),

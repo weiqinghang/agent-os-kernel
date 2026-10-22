@@ -205,8 +205,7 @@ export function boot(doc, win) {
   }
 
   function submitForm() {
-    if (typeof form.requestSubmit === "function") form.requestSubmit();
-    else form.dispatchEvent(new win.Event("submit", { bubbles: true, cancelable: true }));
+    form.dispatchEvent(new win.Event("submit", { bubbles: true, cancelable: true }));
   }
 
   function askRebindConfirm(tw) {
@@ -270,7 +269,7 @@ export function boot(doc, win) {
       if (hasConclusion) askRebindConfirm(tw);
       else {
         await patchSessionTw(tw);
-        setChipActive(btn.getAttribute("data-tw"));
+        setChipActive(chipKey(tw));
         addMsg("assistant", "已改：时间窗→" + tw.label + "。可以说「写一份洞察报告」。");
       }
     } catch (_) {
