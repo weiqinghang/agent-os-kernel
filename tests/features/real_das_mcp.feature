@@ -19,7 +19,13 @@ Feature: 内核经 Bearer 调用真 DAS MCP
     Given 真 DAS MCP 已按契约接好
     When 网关用假 DAS 形状调用 query_stats、describe_dataset 与 sample_records
     Then 真 MCP 参数不含 name、dataset、start、end 与 metric 字符串
-    And query_stats 带上 dataset_id、时间窗 filters 与 metrics 对象
+    And query_stats 带上 dataset_id、时间窗 filters 数组、metrics 数组与 group_by 数组
+
+  Scenario: 友好数据集名解析为 UUID 且只拉一次目录
+    Given 真 DAS MCP 已按契约接好
+    And 目录把 ecommerce_sales_v2 映射到 UUID
+    When 网关用友好名两次调用 query_stats 并用 UUID 再调用一次
+    Then 只请求了一次 list_datasets 且 query_stats 的 dataset_id 都是该 UUID
 
   Scenario: USE_FAKE_DAS 仍按假形状出网
     Given 假 DAS 开关已打开

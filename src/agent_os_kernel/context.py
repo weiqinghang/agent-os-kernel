@@ -170,8 +170,11 @@ def compose_system(manifest_prompt: str, bindings: dict[str, Any]) -> str:
         + "\n\n# Context bindings\n"
         + block
         + "\n\nWhen tool arguments omit dataset or time_window, use the bindings above."
-        + " Real DAS calls use dataset_id plus filters/metrics objects;"
-        + " the gateway rewrites leftover name/dataset/start/end/metric keys."
+        + " Real DAS calls use a UUID dataset_id, a filters array"
+        + " ({field, operator, value}), a metrics array ({function, field, alias}),"
+        + " and a group_by array. The gateway rewrites leftover"
+        + " name/dataset/start/end/metric keys and resolves a dataset name"
+        + " through list_datasets."
     )
 
 

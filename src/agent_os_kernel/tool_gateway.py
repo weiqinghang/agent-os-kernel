@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import Any
@@ -41,20 +42,53 @@ _DATASET_SCOPED = frozenset(
     }
 )
 
-# Fake-DAS argument names. Real MCP models use extra=forbid / additionalProperties: false.
+# Fake-DAS argument names. Real MCP schemas set additionalProperties: false.
 _FAKE_ARG_KEYS = frozenset({"name", "dataset", "start", "end", "time_window", "metric"})
 _FILTER_TOOLS = frozenset({"query_stats", "search_records", "sample_records"})
 _DATE_FIELD = "order_date"
-# Dogfood metric ids from the overnight fake DAS, read as a metrics object.
-_METRIC_FN: dict[str, tuple[str, str | None]] = {
-    "sum_gmv": ("sum", "gmv"),
-    "sum_qty": ("sum", "qty"),
-    "avg_gmv": ("avg", "gmv"),
-    "count": ("count", None),
-    "return_rate": ("avg", "returned"),
+_UUID_RE = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
+_OPERATORS = frozenset(
+    {
+        "eq",
+        "in",
+        "gt",
+        "gte",
+        "lt",
+        "lte",
+        "between",
+        "contains",
+        "overlap",
+        "is_null",
+        "not_null",
+        "text_match",
+    }
+)
+_OP_ALIAS = {"ge": "gte", "le": "lte"}
+_FUNCTIONS = frozenset({"count", "count_distinct", "sum", "avg", "min", "max"})
+# Dogfood metric ids → live query_stats metrics[] items.
+_METRIC_SPEC: dict[str, dict[str, str]] = {
+    "sum_gmv": {"function": "sum", "field": "gmv", "alias": "sum_gmv"},
+    "sum_qty": {"function": "sum", "field": "qty", "alias": "sum_qty"},
+    "avg_gmv": {"function": "avg", "field": "gmv", "alias": "avg_gmv"},
+    "count": {"function": "count", "alias": "count"},
+    "return_rate": {"function": "avg", "field": "returned", "alias": "return_rate"},
 }
+# None = catalog not loaded. Empty dict = loaded, no name→id rows.
+_DATASET_CATALOG: dict[str, str] | None = None
 
 _ACCEPT = "application/json, text/event-stream"
+
+
+def clear_dataset_id_cache() -> None:
+    """Drop the process-local dataset_name → dataset_id catalog."""
+    global _DATASET_CATALOG
+    _DATASET_CATALOG = None
+
+
+def _is_uuid(value: str) -> bool:
+    return bool(_UUID_RE.fullmatch(value.strip()))
 
 
 def _window_bounds(src: dict[str, Any]) -> tuple[Any, Any]:
@@ -66,21 +100,19 @@ def _window_bounds(src: dict[str, Any]) -> tuple[Any, Any]:
     return start, end
 
 
-def _clauses_from_filters(filters: Any) -> list[dict[str, Any]]:
-    """Flat fake filters or an existing DSL object → clause list."""
+def _raw_clauses(filters: Any) -> list[dict[str, Any]]:
+    """Flat fake filters, a clause list, or a legacy {clauses|conditions} object."""
     if isinstance(filters, list):
         return [clause for clause in filters if isinstance(clause, dict)]
     if not isinstance(filters, dict):
         return []
-    nested = filters.get("clauses")
-    if isinstance(nested, list):
-        return [clause for clause in nested if isinstance(clause, dict)]
-    nested = filters.get("conditions")
-    if isinstance(nested, list):
-        return [clause for clause in nested if isinstance(clause, dict)]
+    for key in ("clauses", "conditions"):
+        nested = filters.get(key)
+        if isinstance(nested, list):
+            return [clause for clause in nested if isinstance(clause, dict)]
     clauses: list[dict[str, Any]] = []
     for field, value in filters.items():
-        if field in {"op", "logic", "and", "or"}:
+        if field in {"op", "logic", "and", "or", "operator"}:
             continue
         if isinstance(value, dict):
             for op, val in value.items():
@@ -90,54 +122,147 @@ def _clauses_from_filters(filters: Any) -> list[dict[str, Any]]:
     return clauses
 
 
-def _with_window(clauses: list[dict[str, Any]], start: Any, end: Any) -> list[dict[str, Any]]:
-    seen = {(clause.get("field"), clause.get("op")) for clause in clauses}
-    out = list(clauses)
-    if start and (_DATE_FIELD, "gte") not in seen and (_DATE_FIELD, "ge") not in seen:
-        out.append({"field": _DATE_FIELD, "op": "gte", "value": start})
-    if end and (_DATE_FIELD, "lte") not in seen and (_DATE_FIELD, "le") not in seen:
-        out.append({"field": _DATE_FIELD, "op": "lte", "value": end})
+def _normalize_operator(raw: Any) -> str | None:
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    op = _OP_ALIAS.get(raw.strip(), raw.strip())
+    if op not in _OPERATORS:
+        return None
+    return op
+
+
+def _normalize_clause(clause: dict[str, Any]) -> dict[str, Any] | None:
+    field = clause.get("field")
+    operator = _normalize_operator(clause.get("operator") or clause.get("op"))
+    if not isinstance(field, str) or not field or operator is None:
+        return None
+    out: dict[str, Any] = {"field": field, "operator": operator}
+    if operator in {"is_null", "not_null"}:
+        return out
+    if operator == "text_match":
+        value = clause.get("value")
+        keywords = value.get("keywords") if isinstance(value, dict) else None
+        if not isinstance(keywords, list) or not keywords:
+            return None
+        out["value"] = value
+        return out
+    if "value" in clause:
+        out["value"] = clause["value"]
     return out
 
 
-def _filters_object(src: dict[str, Any]) -> dict[str, Any] | None:
+def _filters_array(src: dict[str, Any]) -> list[dict[str, Any]] | None:
+    """Live schema: filters is an array of {field, operator, value?}."""
+    clauses = [item for item in (_normalize_clause(c) for c in _raw_clauses(src.get("filters"))) if item]
+    seen = {(clause["field"], clause["operator"]) for clause in clauses}
     start, end = _window_bounds(src)
-    clauses = _with_window(_clauses_from_filters(src.get("filters")), start, end)
-    if not clauses:
-        return None
-    return {"op": "and", "clauses": clauses}
+    if start and (_DATE_FIELD, "gte") not in seen:
+        clauses.append({"field": _DATE_FIELD, "operator": "gte", "value": start})
+    if end and (_DATE_FIELD, "lte") not in seen:
+        clauses.append({"field": _DATE_FIELD, "operator": "lte", "value": end})
+    return clauses or None
 
 
-def _metrics_object(src: dict[str, Any]) -> Any:
-    """String `metric` → metrics object. An existing metrics dict/list wins."""
-    existing = src.get("metrics")
-    if isinstance(existing, (dict, list)) and existing:
-        return existing
-    metric = src.get("metric")
-    if isinstance(metric, dict) and metric:
-        return metric
-    if not isinstance(metric, str) or not metric.strip():
+def _metric_from_name(name: str) -> dict[str, str] | None:
+    spec = _METRIC_SPEC.get(name)
+    if spec:
+        return dict(spec)
+    for fn in ("count_distinct", "sum", "avg", "min", "max", "count"):
+        prefix = fn + "_"
+        if name.startswith(prefix) and name[len(prefix) :]:
+            item = {"function": fn, "alias": name}
+            if fn != "count":
+                item["field"] = name[len(prefix) :]
+            return item
+    if name in _FUNCTIONS:
+        return {"function": name, "alias": name}
+    return None
+
+
+def _normalize_metric(item: dict[str, Any]) -> dict[str, Any] | None:
+    fn = item.get("function") or item.get("fn")
+    alias = item.get("alias") or item.get("name")
+    if not isinstance(fn, str) or fn not in _FUNCTIONS:
+        if isinstance(alias, str):
+            return _metric_from_name(alias.strip())
         return None
-    name = metric.strip()
-    fn, field = _METRIC_FN.get(name, (None, None))
-    spec: dict[str, Any] = {"name": name}
-    if fn:
-        spec["fn"] = fn
-    if field:
+    spec: dict[str, Any] = {"function": fn}
+    field = item.get("field")
+    if isinstance(field, str) and field and fn != "count":
         spec["field"] = field
-    return {name: spec}
+    if isinstance(alias, str) and alias.strip() and alias.strip() != fn:
+        spec["alias"] = alias.strip()
+    elif fn == "count" and isinstance(alias, str) and alias.strip():
+        spec["alias"] = alias.strip()
+    return spec
+
+
+def _metrics_array(src: dict[str, Any]) -> list[dict[str, Any]] | None:
+    """Live schema: metrics is an array of {function, field?, alias?}."""
+    existing = src.get("metrics")
+    items: list[Any] = []
+    if isinstance(existing, list) and existing:
+        items = existing
+    elif isinstance(existing, dict) and existing:
+        if any(key in existing for key in ("function", "fn", "field", "alias", "name")):
+            items = [existing]
+        else:
+            for key, val in existing.items():
+                if isinstance(val, dict):
+                    items.append({**val, "alias": val.get("alias") or val.get("name") or key})
+                elif isinstance(val, str):
+                    items.append(val)
+    else:
+        metric = src.get("metric")
+        if isinstance(metric, dict) and metric:
+            items = [metric]
+        elif isinstance(metric, str) and metric.strip():
+            items = [metric.strip()]
+    out: list[dict[str, Any]] = []
+    for item in items:
+        if isinstance(item, str) and item.strip():
+            spec = _metric_from_name(item.strip())
+        elif isinstance(item, dict):
+            spec = _normalize_metric(item)
+        else:
+            spec = None
+        if spec:
+            out.append(spec)
+    return out or None
+
+
+def _group_by_array(value: Any) -> list[Any] | None:
+    """Live schema: group_by is an array of field names or {field, transform?, part?, alias?}."""
+    if isinstance(value, str) and value.strip():
+        return [value.strip()]
+    if not isinstance(value, list):
+        return None
+    out: list[Any] = []
+    for item in value:
+        if isinstance(item, str) and item.strip():
+            out.append(item.strip())
+        elif isinstance(item, dict) and isinstance(item.get("field"), str) and item["field"]:
+            kept = {key: item[key] for key in ("field", "transform", "part", "alias") if key in item}
+            out.append(kept)
+    return out[:3] or None
+
+
+def _copy_present(out: dict[str, Any], merged: dict[str, Any], keys: tuple[str, ...]) -> None:
+    for key in keys:
+        value = merged.get(key)
+        if value is None or value == "" or value == []:
+            continue
+        out[key] = value
 
 
 def adapt_real_arguments(name: str, merged: dict[str, Any]) -> dict[str, Any]:
-    """Normalize fake-DAS / mixed args onto the real MCP argument schema.
+    """Normalize fake-DAS / mixed args onto the live MCP schemas.
 
-    Real tools reject unknown keys (``name``, ``dataset``, ``start``, ``end``,
-    string ``metric``). Dataset scope is ``dataset_id``. Time window and flat
-    equality filters become a ``filters`` object. A metric string becomes a
-    ``metrics`` object. ``group_by`` and ``limit`` pass through on ``query_stats``.
-
-    ``describe_*`` only receives ``dataset_id`` — those schemas do not take the
-    fake time-window keys. ``USE_FAKE_DAS`` does not call this function.
+    ``filters`` is an array of ``{field, operator, value?}``. ``metrics`` is an
+    array of ``{function, field?, alias?}``. ``group_by`` is an array. Fake keys
+    ``name`` / ``dataset`` / ``start`` / ``end`` / ``time_window`` / string
+    ``metric`` are dropped. A non-UUID ``dataset_id`` is resolved later by the
+    gateway. ``USE_FAKE_DAS`` does not call this function.
     """
     dataset_id = merged.get("dataset_id") or merged.get("name") or merged.get("dataset")
     out: dict[str, Any] = {}
@@ -145,30 +270,82 @@ def adapt_real_arguments(name: str, merged: dict[str, Any]) -> dict[str, Any]:
         out["dataset_id"] = dataset_id
 
     if name in _FILTER_TOOLS:
-        filters = _filters_object(merged)
+        filters = _filters_array(merged)
         if filters:
             out["filters"] = filters
     if name == "query_stats":
-        metrics = _metrics_object(merged)
+        metrics = _metrics_array(merged)
         if metrics:
             out["metrics"] = metrics
-        if merged.get("group_by") is not None:
-            out["group_by"] = merged["group_by"]
-        if merged.get("limit") is not None:
-            out["limit"] = merged["limit"]
+        group_by = _group_by_array(merged.get("group_by"))
+        if group_by:
+            out["group_by"] = group_by
+        _copy_present(out, merged, ("limit", "sort"))
     elif name == "search_records":
-        for key in ("q", "keyword", "field", "query", "limit", "offset"):
-            if merged.get(key) not in (None, ""):
-                out[key] = merged[key]
+        _copy_present(
+            out,
+            merged,
+            (
+                "limit",
+                "sort",
+                "return_fields",
+                "evidence_preset",
+                "max_chars_per_field",
+                "include_long_text",
+            ),
+        )
     elif name == "sample_records":
-        for key in ("limit", "offset"):
-            if merged.get(key) is not None:
-                out[key] = merged[key]
-    elif name not in _DATASET_SCOPED:
-        for key, value in merged.items():
-            if key not in _FAKE_ARG_KEYS:
-                out[key] = value
+        _copy_present(
+            out,
+            merged,
+            (
+                "limit",
+                "sort",
+                "return_fields",
+                "evidence_preset",
+                "max_chars_per_field",
+                "include_long_text",
+                "sample_strategy",
+            ),
+        )
+    elif name == "describe_fields":
+        _copy_present(out, merged, ("field_names",))
+    elif name == "describe_tag_hierarchies":
+        _copy_present(out, merged, ("tree_id", "field", "field_series", "include_nodes", "limit"))
+    elif name == "list_datasets":
+        _copy_present(
+            out,
+            merged,
+            (
+                "query",
+                "status",
+                "ready_only",
+                "series",
+                "audience_segment",
+                "include_archived",
+                "include_deleted",
+            ),
+        )
     return out
+
+
+def index_dataset_ids(payload: dict[str, Any]) -> dict[str, str]:
+    """dataset_name / name → dataset_id from a list_datasets payload."""
+    rows = payload.get("datasets")
+    if not isinstance(rows, list):
+        rows = payload.get("items")
+    found: dict[str, str] = {}
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        dataset_id = str(row.get("dataset_id") or row.get("id") or "").strip()
+        if not dataset_id:
+            continue
+        for key in ("dataset_name", "name", "dataset"):
+            label = row.get(key)
+            if isinstance(label, str) and label.strip():
+                found[label.strip()] = dataset_id
+    return found
 
 
 class ToolGatewayError(Exception):
@@ -340,10 +517,34 @@ class ToolGateway:
         return parse_mcp_response(response)
 
     def _adapt(self, name: str, merged: dict[str, Any]) -> dict[str, Any]:
-        """Fake DAS keeps name/start/end/metric. Real MCP gets dataset_id + DSL."""
+        """Fake DAS keeps name/start/end/metric. Real MCP gets the live schema."""
         if use_fake_das():
             return merged
         return adapt_real_arguments(name, merged)
+
+    def _dataset_catalog(self) -> dict[str, str]:
+        global _DATASET_CATALOG
+        if _DATASET_CATALOG is not None:
+            return _DATASET_CATALOG
+        try:
+            listed = self.call("list_datasets", {})
+        except ToolGatewayError:
+            _DATASET_CATALOG = {}
+            return _DATASET_CATALOG
+        _DATASET_CATALOG = index_dataset_ids(listed.get("data") or {})
+        return _DATASET_CATALOG
+
+    def _resolve_dataset_id(self, name: str, merged: dict[str, Any]) -> dict[str, Any]:
+        """Friendly dataset_name → UUID via one cached list_datasets call."""
+        if name not in _DATASET_SCOPED:
+            return merged
+        raw = merged.get("dataset_id")
+        if not isinstance(raw, str) or not raw.strip() or _is_uuid(raw):
+            return merged
+        resolved = self._dataset_catalog().get(raw.strip())
+        if not resolved or resolved == raw.strip():
+            return merged
+        return {**merged, "dataset_id": resolved}
 
     def call(
         self,
@@ -358,11 +559,14 @@ class ToolGateway:
         if "sql" in merged or any(str(k).lower() == "sql" for k in merged):
             raise ToolGatewayError("raw SQL rejected by tool gateway")
         merged = self._adapt(name, merged)
-        if bindings:
-            if bindings.get("tenant_id") and "tenant_id" not in merged:
-                merged["tenant_id"] = bindings["tenant_id"]
-            if bindings.get("project_id") and "project_id" not in merged:
-                merged["project_id"] = bindings["project_id"]
+        if use_fake_das():
+            if bindings:
+                if bindings.get("tenant_id") and "tenant_id" not in merged:
+                    merged["tenant_id"] = bindings["tenant_id"]
+                if bindings.get("project_id") and "project_id" not in merged:
+                    merged["project_id"] = bindings["project_id"]
+        else:
+            merged = self._resolve_dataset_id(name, merged)
         payload = {
             "jsonrpc": "2.0",
             "id": 1,

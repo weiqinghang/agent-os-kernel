@@ -72,21 +72,23 @@ export APP_RUNTIME_ENV_FILE="$PWD/.env"
 - tool payload is `result.structuredContent` when it is an object; otherwise JSON inside `result.content[]`
 - missing `evidence.fingerprint` is filled by the gateway (sha256 prefix) so the conclusion page still has an anchor
 - raw SQL (`sql` / `SQL` argument) is rejected before the HTTP call
-- `USE_FAKE_DAS=1` forwards fake-DAS arguments unchanged (`name`, `start`, `end`, string `metric`)
-- real MCP (`additionalProperties: false`) is normalized in `adapt_real_arguments` before POST:
+- `USE_FAKE_DAS=1` forwards fake-DAS arguments unchanged (`name`, `start`, `end`, string `metric`). It does not resolve dataset names.
+- real MCP (`additionalProperties: false`, live `tools/list`) is normalized in `adapt_real_arguments` before POST:
 
   | Incoming (model / bindings / fake shape) | Real argument |
   | --- | --- |
-  | `dataset_id`, else `name`, else `dataset` | `dataset_id` (explicit `dataset_id` wins) |
-  | `start` / `end` or `time_window.start` / `end` | `filters.clauses[]` on `order_date` with `gte` / `lte` |
-  | flat `filters` `{field: value}` | `filters = {op: "and", clauses: [{field, op: "eq", value}]}` |
-  | existing `filters.clauses` or `filters.conditions` | kept, then the time window is appended if missing |
-  | string `metric` (`sum_gmv`, `sum_qty`, `avg_gmv`, `count`, `return_rate`) | `metrics = {<id>: {name, fn, field?}}` |
-  | `metrics` already an object or list | kept; the string `metric` is dropped |
-  | `group_by`, `limit` on `query_stats` | passed through |
-  | `name`, `dataset`, `start`, `end`, `time_window`, string `metric` | stripped so they are not additional properties |
+  | `dataset_id`, else `name`, else `dataset` | `dataset_id`. A non-UUID is resolved once via `list_datasets` (`dataset_name` / `name` → `dataset_id`) and cached. A value that is already a UUID is sent as-is. Bindings may stay `ecommerce_sales_v2`. |
+  | `start` / `end` or `time_window.start` / `end` | `filters[]` item `{field: "order_date", operator: "gte"\|"lte", value}` |
+  | flat `filters` `{field: value}` | `filters[]` item `{field, operator: "eq", value}` |
+  | `filters` list, or legacy `{clauses\|conditions}` | same array; `op` is renamed to `operator` (`ge`→`gte`, `le`→`lte`) |
+  | string `metric` | `metrics[]` item `{function, field?, alias}` |
+  | `sum_gmv` / `sum_qty` / `avg_gmv` | `{function: sum\|avg, field: gmv\|qty, alias: <id>}` |
+  | `count` | `{function: "count", alias: "count"}` (no field) |
+  | `return_rate` | `{function: "avg", field: "returned", alias: "return_rate"}` |
+  | `group_by` string | `[group_by]`; a list is kept and truncated to 3 |
+  | `name`, `dataset`, `start`, `end`, `time_window`, string `metric` | stripped |
 
-  `describe_dataset` / `describe_fields` / `describe_tag_hierarchies` send `dataset_id` only. `query_stats`, `search_records`, and `sample_records` also send the `filters` object (and `query_stats` sends `metrics`).
+  `filters` / `metrics` / `group_by` are arrays. They are not `{op, clauses}` objects and not a dict keyed by metric id. `query_stats`, `search_records`, and `sample_records` take the filters array. Only `query_stats` takes `metrics` and `group_by`. `describe_dataset` takes `dataset_id` only. Keys outside the live tool schema are not forwarded.
 
 Whitelist (on-box `tools/list` exposes the two describe tools, so they are allow-listed):
 
