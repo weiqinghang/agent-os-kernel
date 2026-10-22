@@ -426,14 +426,15 @@ def handle_user_message(
         for kind in skill.get("hitl_kinds") or []:
             if kind == "outline_confirm" and hitl.should_pause(kind):
                 token = hitl.make_token(kind)
+                prompts = skill.get("hitl_prompts") or {}
+                md = prompts.get(kind) or "请确认后继续。"
                 run.set_state(
                     run_id,
                     "awaiting_hitl",
                     resume_token=token["resume_token"],
                     hitl_kind=kind,
+                    result=md,
                 )
-                prompts = skill.get("hitl_prompts") or {}
-                md = prompts.get(kind) or "请确认后继续。"
                 obs.emit(
                     run_id,
                     "hitl",

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -97,6 +98,44 @@ class MessageIn(BaseModel):
     confirm_rebind: bool | None = None  # UI: user confirmed new Run after chip change
 
 
+def _persist_assistant(session_id: str, run_id: str, result: dict[str, Any]) -> None:
+    md = result.get("markdown") or result.get("message") or ""
+    if result.get("status") in ("completed", "awaiting_hitl") and md:
+        session.add_message(session_id, "assistant", md, run_id=run_id)
+
+
+def _drive_turn(session_id: str, run_id: str, target: Any, args: tuple[Any, ...]) -> None:
+    try:
+        result = target(*args)
+    except Exception as exc:  # noqa: BLE001
+        run.set_state(run_id, "failed", result=f"编排失败：{exc}")
+        return
+    try:
+        _persist_assistant(session_id, run_id, result or {})
+    except Exception:
+        return
+
+
+def _start_turn(session_id: str, run_id: str, target: Any, args: tuple[Any, ...]) -> None:
+    threading.Thread(
+        target=_drive_turn,
+        args=(session_id, run_id, target, args),
+        name=f"turn-{run_id}",
+        daemon=True,
+    ).start()
+
+
+def _accept(session_id: str, run_id: str, bindings: dict[str, Any]) -> dict[str, Any]:
+    snap = run.get_run(run_id) or {}
+    return {
+        "session_id": session_id,
+        "run_id": run_id,
+        "status": snap.get("state") or "created",
+        "accepted": True,
+        "context_bindings": bindings,
+    }
+
+
 def _resolve_for_message(
     session_id: str,
     body: MessageIn,
@@ -141,22 +180,14 @@ def post_message(session_id: str, body: MessageIn) -> dict[str, Any]:
     resolved = _resolve_for_message(session_id, body)
     session.add_message(session_id, "user", body.text)
     r = run.create_run(session_id, context_bindings=resolved)
-
-    result = orchestrator.handle_user_message(session_id, r["id"], body.text)
-    md = result.get("markdown") or result.get("message") or ""
-    if result.get("status") in ("completed", "awaiting_hitl"):
-        session.add_message(session_id, "assistant", md, run_id=r["id"])
-
-    return {
-        "session_id": session_id,
-        "run_id": r["id"],
-        "status": result.get("status"),
-        "markdown": md,
-        "hitl": result.get("hitl"),
-        "evidence": result.get("evidence"),
-        "context_bindings": resolved,
-        "text": md,
-    }
+    # The agent loop keeps running after this response. Clients poll events.
+    _start_turn(
+        session_id,
+        r["id"],
+        orchestrator.handle_user_message,
+        (session_id, r["id"], body.text),
+    )
+    return _accept(session_id, r["id"], resolved)
 
 
 class HitlResume(BaseModel):
@@ -175,29 +206,61 @@ def resume_run(run_id: str, body: HitlResume) -> dict[str, Any]:
     if rr.get("resume_token") and rr["resume_token"] != body.resume_token:
         raise HTTPException(403, "bad resume_token")
     if not body.approve:
-        run.set_state(run_id, "failed", result="HITL rejected")
+        run.set_state(run_id, "failed", result="已拒绝")
         obs.emit(run_id, "hitl", {"kind": rr.get("hitl_kind"), "approved": False})
-        return {"status": "failed", "markdown": "已拒绝"}
+        return {
+            "run_id": run_id,
+            "status": "failed",
+            "markdown": "已拒绝",
+            "accepted": True,
+            "context_bindings": rr.get("context_bindings") or {},
+        }
     obs.emit(run_id, "hitl", {"kind": rr.get("hitl_kind"), "approved": True})
-    result = orchestrator.resume_after_hitl(run_id, body.text or "请继续生成报告")
-    md = result.get("markdown") or ""
-    if result.get("status") == "completed":
-        session.add_message(rr["session_id"], "assistant", md, run_id=run_id)
-    return {
-        "run_id": run_id,
-        "status": result.get("status"),
-        "markdown": md,
-        "context_bindings": rr.get("context_bindings"),
-    }
+    # Leave awaiting_hitl before returning so a second resume cannot start another loop.
+    run.set_state(run_id, "acting")
+    text = body.text or "请继续生成报告"
+    _start_turn(rr["session_id"], run_id, orchestrator.resume_after_hitl, (run_id, text))
+    accepted = _accept(rr["session_id"], run_id, rr.get("context_bindings") or {})
+    accepted.pop("session_id", None)
+    return accepted
+
+
+def _run_or_404(run_id: str) -> dict[str, Any]:
+    rr = run.get_run(run_id)
+    if not rr:
+        raise HTTPException(404, "run not found")
+    return rr
 
 
 @app.get("/runs/{run_id}")
 def get_run(run_id: str) -> dict[str, Any]:
-    rr = run.get_run(run_id)
-    if not rr:
-        raise HTTPException(404, "run not found")
+    rr = _run_or_404(run_id)
     rr["events"] = obs.list_events(run_id)
     return rr
+
+
+@app.get("/runs/{run_id}/events")
+def get_run_events(
+    run_id: str,
+    after_id: int | None = None,
+    limit: int = 100,
+) -> dict[str, Any]:
+    """Poll new events. after_id is the last id the client already has."""
+    if after_id is not None and after_id < 0:
+        raise HTTPException(400, "bad after_id")
+    if limit < 1 or limit > 500:
+        raise HTTPException(400, "bad limit")
+    rr = _run_or_404(run_id)
+    body: dict[str, Any] = {
+        "run_id": run_id,
+        "state": rr["state"],
+        "result": rr.get("result"),
+        "context_bindings": rr.get("context_bindings") or {},
+        "events": obs.list_events(run_id, limit=limit, after_id=after_id),
+    }
+    if rr["state"] == "awaiting_hitl":
+        body["hitl"] = {"kind": rr.get("hitl_kind"), "resume_token": rr.get("resume_token")}
+    return body
 
 
 @app.get("/skills")

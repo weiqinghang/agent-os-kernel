@@ -20,6 +20,8 @@ const RUN_ID = "run_3cbdbe50347f";
 const TOKEN = "hitl_0123456789abcdef";
 
 settings.replayMs = 1;
+settings.pollMs = 20;
+settings.pollBudgetMs = 120000;
 
 const SECRETS = [
   "query_stats",
@@ -107,6 +109,26 @@ if (process.stdout._handle && process.stdout._handle.setBlocking) {
 
 function wait(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function waitUntil(pred, ms) {
+  const started = Date.now();
+  while (Date.now() - started < ms) {
+    if (pred()) return;
+    await wait(15);
+  }
+  throw new Error("timed out waiting\n" + JSON.stringify(snapshot()));
+}
+
+function stamp(win, events) {
+  const out = [];
+  for (const ev of events || []) {
+    if (!ev || typeof ev !== "object") continue;
+    const id = win.__nextId || 1;
+    win.__nextId = id + 1;
+    out.push(Object.assign({ id }, ev));
+  }
+  return out;
 }
 
 function jsonResponse(body, status = 200) {
@@ -262,6 +284,12 @@ function releaseSpec(kind) {
 function installFetch(window, opts) {
   window.__events = [];
   window.__pending = [];
+  window.__polls = 0;
+  window.__nextId = 1;
+  window.__runState = null;
+  window.__result = null;
+  window.__hitl = null;
+  window.__bindings = null;
   window.__messagePosts = 0;
   window.__resumePosts = 0;
   window.__lastRequestText = "";
@@ -299,6 +327,31 @@ function route(window, url, options) {
   if (method === "POST" && url.includes("/resume")) {
     window.__resumePosts += 1;
     return new Promise((resolve) => window.__pending.push({ resolve }));
+  }
+  if (method === "GET" && url.includes("/events")) {
+    window.__polls = (window.__polls || 0) + 1;
+    if (window.__runsBadJson) {
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        json: async () => {
+          throw new Error("bad json");
+        },
+      });
+    }
+    if (window.__runsFail) return Promise.resolve(jsonResponse({}, 500));
+    const parsed = new URL(url, "http://127.0.0.1:8787");
+    const after = Number(parsed.searchParams.get("after_id") || 0);
+    const events = (window.__events || []).filter((ev) => ev && typeof ev.id === "number" && ev.id > after);
+    const body = {
+      run_id: RUN_ID,
+      state: window.__runState || null,
+      events,
+    };
+    if (typeof window.__result === "string") body.result = window.__result;
+    if (window.__hitl) body.hitl = window.__hitl;
+    if (window.__bindings) body.context_bindings = window.__bindings;
+    return Promise.resolve(jsonResponse(body));
   }
   if (method === "GET" && url.includes("/runs/")) {
     if (window.__runsBadJson) {
@@ -380,6 +433,9 @@ function snapshot() {
 }
 
 async function doReset(msg) {
+  settings.replayMs = 1;
+  settings.pollMs = 20;
+  settings.pollBudgetMs = 120000;
   if (current && current.win && typeof current.win.close === "function") current.win.close();
   const html = fs.readFileSync(HTML_PATH, "utf8").replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, "");
   const virtualConsole = new VirtualConsole();
@@ -409,14 +465,85 @@ async function doSend(text) {
 async function doRelease(msg) {
   const spec = releaseSpec(msg.kind);
   const win = current.win;
-  win.__events = spec.events || [];
+  win.__events = stamp(win, spec.events || []);
   win.__runsFail = !!spec.runsFail;
   win.__runsBadJson = !!spec.runsBadJson;
+  const body = spec.body || {};
+  win.__runState = body.status || null;
+  const result = body.markdown || body.message || body.text;
+  win.__result = typeof result === "string" ? result : null;
+  win.__hitl = body.hitl || null;
+  win.__bindings = body.context_bindings || null;
   const pending = (win.__pending || []).shift();
   if (!pending) throw new Error("no pending request");
   if (spec.httpFail) pending.resolve(jsonResponse(spec.body || {}, 500));
   else pending.resolve(jsonResponse(spec.body || {}));
-  await wait(60);
+  await waitUntil(() => {
+    const btn = current.doc.getElementById("send");
+    return !!(btn && !btn.disabled);
+  }, 800);
+  return snapshot();
+}
+
+async function doAccept(msg) {
+  const win = current.win;
+  if (msg.pollBudgetMs != null) settings.pollBudgetMs = msg.pollBudgetMs;
+  win.__runsFail = !!msg.runsFail;
+  win.__runsBadJson = !!msg.runsBadJson;
+  win.__runState = "acting";
+  win.__result = null;
+  win.__hitl = null;
+  win.__bindings = {
+    time_window: { label: "近90天", start: "2025-07-25", end: "2025-10-22" },
+  };
+  const pending = (win.__pending || []).shift();
+  if (!pending) throw new Error("no pending request");
+  pending.resolve(
+    jsonResponse({
+      run_id: RUN_ID,
+      status: "acting",
+      accepted: true,
+      context_bindings: win.__bindings,
+    })
+  );
+  if (msg.runsFail || msg.pollBudgetMs === 0) {
+    await waitUntil(() => textOf(current.doc.body).includes("这次没能完成"), 800);
+  } else {
+    await waitUntil(() => (win.__polls || 0) >= 1, 800);
+  }
+  return snapshot();
+}
+
+async function doPush(msg) {
+  const win = current.win;
+  const expect = msg.kind === "tool" ? "正在查询数据" : "思考中";
+  const extra =
+    msg.kind === "tool"
+      ? [{ kind: "tool_call", payload: { ok: true } }]
+      : [{ kind: "model_step", payload: { step: 0, type: "tool_calls" } }];
+  win.__events = (win.__events || []).concat(stamp(win, extra));
+  await waitUntil(() => {
+    const strip = current.doc.querySelector(".progress-strip");
+    const text = strip && strip.querySelector(".progress-text");
+    return !!(text && text.textContent === expect);
+  }, 800);
+  return snapshot();
+}
+
+async function doFinish(msg) {
+  const win = current.win;
+  if ((msg.kind || "success") === "success") {
+    win.__events = (win.__events || []).concat(
+      stamp(win, [
+        { kind: "model_step", payload: { step: 2, type: "final" } },
+        { kind: "state", payload: { state: "completed" } },
+      ])
+    );
+  }
+  win.__runState = "completed";
+  win.__result = CONCLUSION;
+  await waitUntil(() => current.doc.querySelectorAll(".progress-strip").length === 0, 800);
+  await waitUntil(() => textOf(current.doc.body).includes("发现"), 800);
   return snapshot();
 }
 
@@ -450,6 +577,9 @@ async function handle(msg) {
   if (msg.op === "send") return doSend(msg.text || "");
   if (msg.op === "blank") return doSend("   ");
   if (msg.op === "release") return doRelease(msg);
+  if (msg.op === "accept") return doAccept(msg);
+  if (msg.op === "push") return doPush(msg);
+  if (msg.op === "finish") return doFinish(msg);
   if (msg.op === "chip") return doChip(msg.label);
   if (msg.op === "click") return doClick(msg.text);
   if (msg.op === "label") return doLabel();

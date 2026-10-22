@@ -3,19 +3,44 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 import time
 from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[2]
 DB_PATH = ROOT / "data" / "kernel.db"
+_DB_LOCK = threading.RLock()
 
 
-def _conn() -> sqlite3.Connection:
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    c = sqlite3.connect(DB_PATH)
-    c.row_factory = sqlite3.Row
-    return c
+class _LockedConn:
+    """One writer at a time. The turn thread and the events poll share this file."""
+
+    def __enter__(self) -> sqlite3.Connection:
+        _DB_LOCK.acquire()
+        try:
+            DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+            self._c = sqlite3.connect(DB_PATH, timeout=30.0)
+            self._c.row_factory = sqlite3.Row
+            self._c.execute("PRAGMA busy_timeout=30000")
+            return self._c
+        except Exception:
+            _DB_LOCK.release()
+            raise
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        try:
+            if exc_type is None:
+                self._c.commit()
+            else:
+                self._c.rollback()
+        finally:
+            self._c.close()
+            _DB_LOCK.release()
+
+
+def _conn() -> _LockedConn:
+    return _LockedConn()
 
 
 def init_db() -> None:
@@ -61,21 +86,39 @@ def init_db() -> None:
             c.execute("ALTER TABLE runs ADD COLUMN context_bindings TEXT")
 
 
-def emit(run_id: str, kind: str, payload: dict[str, Any] | None = None) -> None:
+def emit(run_id: str, kind: str, payload: dict[str, Any] | None = None) -> int:
     with _conn() as c:
-        c.execute(
+        cur = c.execute(
             "INSERT INTO run_events(run_id, ts, kind, payload) VALUES (?,?,?,?)",
             (run_id, time.time(), kind, json.dumps(payload or {}, ensure_ascii=False)),
         )
+        return int(cur.lastrowid)
 
 
-def list_events(run_id: str, limit: int = 100) -> list[dict[str, Any]]:
+def list_events(
+    run_id: str,
+    limit: int = 100,
+    *,
+    after_id: int | None = None,
+) -> list[dict[str, Any]]:
+    """Events for one Run, oldest first. after_id keeps only rows with a greater id."""
+    sql = "SELECT id, ts, kind, payload FROM run_events WHERE run_id=?"
+    params: list[Any] = [run_id]
+    if after_id is not None:
+        sql += " AND id>?"
+        params.append(int(after_id))
+    sql += " ORDER BY id LIMIT ?"
+    params.append(int(limit))
     with _conn() as c:
-        rows = c.execute(
-            "SELECT ts, kind, payload FROM run_events WHERE run_id=? ORDER BY id LIMIT ?",
-            (run_id, limit),
-        ).fetchall()
+        rows = c.execute(sql, params).fetchall()
     out = []
     for r in rows:
-        out.append({"ts": r["ts"], "kind": r["kind"], "payload": json.loads(r["payload"])})
+        out.append(
+            {
+                "id": r["id"],
+                "ts": r["ts"],
+                "kind": r["kind"],
+                "payload": json.loads(r["payload"]),
+            }
+        )
     return out

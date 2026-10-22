@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 
 import httpx
@@ -559,6 +560,30 @@ def then_no_post(mcp_world):
     assert mcp_world["fake"].requests == []
 
 
+def _settle_chat(client: TestClient, payload: dict, timeout: float = 30.0) -> dict:
+    """Block the test, not the HTTP handler, until the background turn reaches a terminal state."""
+    run_id = payload["run_id"]
+    deadline = time.time() + timeout
+    last: dict | None = None
+    while time.time() < deadline:
+        snap = client.get(f"/runs/{run_id}").json()
+        last = snap
+        if snap.get("state") in ("completed", "failed", "awaiting_hitl"):
+            hitl = None
+            if snap["state"] == "awaiting_hitl":
+                hitl = {"kind": snap.get("hitl_kind"), "resume_token": snap.get("resume_token")}
+            return {
+                "run_id": run_id,
+                "status": snap["state"],
+                "markdown": snap.get("result") or "",
+                "text": snap.get("result") or "",
+                "context_bindings": snap.get("context_bindings") or payload.get("context_bindings") or {},
+                "hitl": hitl,
+            }
+        time.sleep(0.02)
+    raise AssertionError(last)
+
+
 @when("用户让内核写一份电商洞察报告")
 def when_dogfood(mcp_world):
     with TestClient(app) as client:
@@ -580,8 +605,11 @@ def when_dogfood(mcp_world):
             json={"text": "请基于电商销量数据写一份简短洞察报告"},
         )
         assert resp.status_code == 200
+        accepted = resp.json()
+        assert accepted["run_id"]
+        assert accepted["accepted"] is True
         mcp_world["health"] = health
-        mcp_world["chat"] = resp.json()
+        mcp_world["chat"] = _settle_chat(client, accepted)
         mcp_world["sid"] = sid
 
 
@@ -1070,21 +1098,28 @@ def test_kernel_routes_and_hitl(monkeypatch, tmp_path):
         bad = client.post(f"/sessions/{sid}/messages", json={"text": "x", "skill": "nope"})
         assert bad.status_code == 400
 
-        paused = client.post(
-            f"/sessions/{sid}/messages",
-            json={"text": "请基于电商销量数据写一份简短洞察报告"},
-        ).json()
+        paused = _settle_chat(
+            client,
+            client.post(
+                f"/sessions/{sid}/messages",
+                json={"text": "请基于电商销量数据写一份简短洞察报告"},
+            ).json(),
+        )
         assert paused["status"] == "awaiting_hitl"
+        assert paused["markdown"]
         token = paused["hitl"]["resume_token"]
         run_id = paused["run_id"]
         assert client.post(
             f"/runs/{run_id}/resume",
             json={"resume_token": "wrong", "approve": True},
         ).status_code == 403
-        approved = client.post(
-            f"/runs/{run_id}/resume",
-            json={"resume_token": token, "approve": True, "text": "请继续生成报告"},
-        ).json()
+        approved = _settle_chat(
+            client,
+            client.post(
+                f"/runs/{run_id}/resume",
+                json={"resume_token": token, "approve": True, "text": "请继续生成报告"},
+            ).json(),
+        )
         assert approved["status"] == "completed"
         assert SEED in approved["markdown"]
         assert client.post(
@@ -1092,22 +1127,29 @@ def test_kernel_routes_and_hitl(monkeypatch, tmp_path):
             json={"resume_token": token, "approve": True},
         ).status_code == 400
 
-        paused_again = client.post(
-            f"/sessions/{sid}/messages",
-            json={"text": "请再写一份洞察报告"},
-        ).json()
+        paused_again = _settle_chat(
+            client,
+            client.post(
+                f"/sessions/{sid}/messages",
+                json={"text": "请再写一份洞察报告"},
+            ).json(),
+        )
         assert paused_again["status"] == "awaiting_hitl"
         rejected = client.post(
             f"/runs/{paused_again['run_id']}/resume",
             json={"resume_token": paused_again["hitl"]["resume_token"], "approve": False},
         ).json()
         assert rejected["status"] == "failed"
+        assert rejected["markdown"] == "已拒绝"
 
         monkeypatch.setenv("HITL_AUTO", "1")
-        done = client.post(
-            f"/sessions/{sid}/messages",
-            json={"text": "哪个省份 GMV 最高？"},
-        ).json()
+        done = _settle_chat(
+            client,
+            client.post(
+                f"/sessions/{sid}/messages",
+                json={"text": "哪个省份 GMV 最高？"},
+            ).json(),
+        )
         assert done["status"] == "completed"
         assert "江苏" in done["markdown"]
         snap = client.get(f"/runs/{done['run_id']}").json()

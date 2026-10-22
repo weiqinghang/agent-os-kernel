@@ -86,15 +86,45 @@ else
 fi
 export DAS_MODE GMV90 GMV30 TOP_PROV
 
+# POST returns run_id while the turn keeps acting. Assertions use the settled run.
+settle_turn() {
+  python3 - "$BASE_K" "$1" <<'PY'
+import json, sys, time, urllib.request
+base, accepted = sys.argv[1], json.loads(sys.argv[2])
+run_id = accepted["run_id"]
+deadline = time.time() + 180
+last = None
+while time.time() < deadline:
+    with urllib.request.urlopen(base + "/runs/" + run_id, timeout=10) as resp:
+        snap = json.load(resp)
+    last = snap
+    state = snap.get("state")
+    if state in ("completed", "failed", "awaiting_hitl"):
+        if state != "completed":
+            raise SystemExit("turn " + state + ": " + str(snap.get("result"))[:400])
+        out = {
+            "run_id": run_id,
+            "status": state,
+            "markdown": snap.get("result") or "",
+            "text": snap.get("result") or "",
+            "context_bindings": snap.get("context_bindings") or accepted.get("context_bindings") or {},
+        }
+        print(json.dumps(out, ensure_ascii=False))
+        raise SystemExit(0)
+    time.sleep(0.2)
+raise SystemExit("turn did not finish: " + json.dumps(last, ensure_ascii=False)[:400])
+PY
+}
+
 # --- Beat 1: scoped conclusion (90d) ---
 SID=$(curl -sf -X POST "$BASE_K/sessions" -H 'Content-Type: application/json' \
   -d "{\"bindings\":{\"skill\":\"insight_report\",\"dataset\":\"$DATASET_ID\",\"time_window\":{\"label\":\"近90天\",\"start\":\"2025-07-25\",\"end\":\"2025-10-22\"}}}" \
   | python3 -c 'import sys,json; print(json.load(sys.stdin)["id"])')
 echo "session=$SID"
 
-RESP=$(curl -sf -X POST "$BASE_K/sessions/$SID/messages" \
+RESP=$(settle_turn "$(curl -sf -X POST "$BASE_K/sessions/$SID/messages" \
   -H 'Content-Type: application/json' \
-  -d '{"text":"请基于电商销量数据写一份简短洞察报告"}')
+  -d '{"text":"请基于电商销量数据写一份简短洞察报告"}')")
 echo "$RESP" | grep -EEq '发现|证据|evidence'
 echo "$RESP" | grep -F "$DATASET_ID" >/dev/null
 echo "$RESP" | grep -F '近90天' >/dev/null
@@ -117,10 +147,32 @@ assert n_tool >= 3, n_tool
 print(f"PASS run snapshot + events (n_tool={n_tool})")
 '
 
+python3 - "$BASE_K" "$RUN1" <<'PY'
+import json, sys, urllib.parse, urllib.request
+base, run_id = sys.argv[1], sys.argv[2]
+with urllib.request.urlopen(base + "/runs/" + run_id + "/events", timeout=10) as resp:
+    page = json.load(resp)
+events = page["events"]
+assert events, page
+assert [e["id"] for e in events] == sorted(e["id"] for e in events)
+first = events[0]["id"]
+query = urllib.parse.urlencode({"after_id": first})
+with urllib.request.urlopen(base + "/runs/" + run_id + "/events?" + query, timeout=10) as resp:
+    rest = json.load(resp)
+assert rest["run_id"] == run_id
+assert [e["id"] for e in rest["events"]] == [e["id"] for e in events if e["id"] > first]
+last = events[-1]["id"]
+query = urllib.parse.urlencode({"after_id": last})
+with urllib.request.urlopen(base + "/runs/" + run_id + "/events?" + query, timeout=10) as resp:
+    empty = json.load(resp)
+assert empty["events"] == []
+print("PASS events after_id")
+PY
+
 # --- Beat 2: drill evidence ---
-RESP2=$(curl -sf -X POST "$BASE_K/sessions/$SID/messages" \
+RESP2=$(settle_turn "$(curl -sf -X POST "$BASE_K/sessions/$SID/messages" \
   -H 'Content-Type: application/json' \
-  -d '{"text":"第2条依据是什么？给我样本"}')
+  -d '{"text":"第2条依据是什么？给我样本"}')")
 echo "$RESP2" | grep -EEq '样本|ORD|evidence|依据'
 if [[ "$DAS_MODE" == "fake" ]]; then
   echo "$RESP2" | python3 -c '
@@ -160,9 +212,9 @@ curl -sf -X PATCH "$BASE_K/sessions/$SID/context" \
   -d '{"bindings":{"time_window":{"label":"近30天","start":"2025-09-22","end":"2025-10-22"}}}' \
   | python3 -c 'import sys,json; d=json.load(sys.stdin); assert d["bindings"]["time_window"]["label"]=="近30天"; print("PASS patch context time_window")'
 
-RESP3=$(curl -sf -X POST "$BASE_K/sessions/$SID/messages" \
+RESP3=$(settle_turn "$(curl -sf -X POST "$BASE_K/sessions/$SID/messages" \
   -H 'Content-Type: application/json' \
-  -d '{"text":"请基于电商销量数据写一份简短洞察报告","bindings":{"time_window":{"label":"近30天","start":"2025-09-22","end":"2025-10-22"}}}')
+  -d '{"text":"请基于电商销量数据写一份简短洞察报告","bindings":{"time_window":{"label":"近30天","start":"2025-09-22","end":"2025-10-22"}}}')")
 echo "$RESP3" | grep -F '近30天' >/dev/null
 echo "$RESP3" | grep -F "$DATASET_ID" >/dev/null
 if [[ "$DAS_MODE" == "fake" ]]; then
@@ -187,9 +239,9 @@ RUN3=$(echo "$RESP3" | python3 -c 'import sys,json; print(json.load(sys.stdin)["
 test "$RUN1" != "$RUN3"
 echo "PASS beat3 new Run id (run1=$RUN1 run3=$RUN3)"
 
-RESP4=$(curl -sf -X POST "$BASE_K/sessions/$SID/messages" \
+RESP4=$(settle_turn "$(curl -sf -X POST "$BASE_K/sessions/$SID/messages" \
   -H 'Content-Type: application/json' \
-  -d '{"text":"哪个省份 GMV 最高？"}')
+  -d '{"text":"哪个省份 GMV 最高？"}')")
 if [[ "$DAS_MODE" == "fake" ]]; then
   echo "$RESP4" | grep -F "$TOP_PROV" >/dev/null || echo "$RESP4" | grep -Eq '省份|GMV'
 else
