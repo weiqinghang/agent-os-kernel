@@ -9,7 +9,7 @@ from ..context import SEED_DATASET_ID
 
 SKILL: dict[str, Any] = {
     "name": "insight_report",
-    "version": "0.3.0",
+    "version": "0.4.0",
     "system_prompt": (
         "你是电商销量洞察报告助理。只用工具返回的聚合数字写中文结论，"
         "每条发现必须带 evidence 指纹；禁止臆造数字或绕过工具网关。"
@@ -40,6 +40,14 @@ SKILL: dict[str, Any] = {
     "hitl_prompts": {
         "outline_confirm": "请确认报告大纲后继续（范围以会话 Context bindings 为准）。",
     },
+    # 业务计划只写在这里。编排抄进 plan 事件和大纲正文，不另起阶段机。
+    "plan_steps": [
+        {"id": "scope", "label": "确认这次要看的范围"},
+        {"id": "category", "label": "看清类目卖得怎么样"},
+        {"id": "channel", "label": "看清渠道结构"},
+        {"id": "province", "label": "看清各省贡献"},
+        {"id": "returns", "label": "看清退货风险"},
+    ],
     "default_bindings": {
         "dataset": SEED_DATASET_ID,
         "time_window": {"label": "近90天", "start": "2025-07-25", "end": "2025-10-22"},

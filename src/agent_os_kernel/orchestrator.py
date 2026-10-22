@@ -433,6 +433,58 @@ def _stop_for_repeat(
     return _fail_loop(run_id, shown)
 
 
+def _copied_plan(skill: dict[str, Any]) -> dict[str, Any] | None:
+    """Copy Skill plan_steps into the plan event. No business sentences are written here."""
+    raw = skill.get("plan_steps")
+    if not isinstance(raw, list) or not raw:
+        return None
+    steps: list[dict[str, str]] = []
+    for item in raw:
+        if len(steps) >= 5:
+            break
+        if not isinstance(item, dict):
+            continue
+        step_id = item.get("id")
+        label = item.get("label")
+        if not isinstance(step_id, str) or not isinstance(label, str):
+            continue
+        step_id = step_id.strip()
+        label = label.strip()
+        if not step_id or not label:
+            continue
+        steps.append({"id": step_id, "label": label, "status": "pending"})
+    if not steps:
+        return None
+    return {"revision": 1, "steps": steps}
+
+
+def _outline_markdown(skill: dict[str, Any], plan: dict[str, Any] | None) -> str:
+    """Outline HITL uses the same copied steps as the plan event."""
+    prompts = skill.get("hitl_prompts")
+    intro = ""
+    if isinstance(prompts, dict):
+        intro = str(prompts.get("outline_confirm") or "").strip()
+    if not intro:
+        intro = "请确认后继续。"
+    if plan is None:
+        return intro
+    lines = [intro, ""]
+    for index, step in enumerate(plan["steps"], 1):
+        lines.append(f"{index}. {step['label']}")
+    return "\n".join(lines)
+
+
+def _emit_plan_once(run_id: str, skill: dict[str, Any]) -> None:
+    """One plan event per Run. Resume and HITL_AUTO do not write another revision."""
+    plan = _copied_plan(skill)
+    if plan is None:
+        return
+    for event in obs.list_events(run_id, limit=500):
+        if event.get("kind") == "plan":
+            return
+    obs.emit(run_id, "plan", plan)
+
+
 def handle_user_message(
     session_id: str,
     run_id: str,
@@ -460,13 +512,14 @@ def handle_user_message(
         "state",
         {"state": "acting", "skill": skill.get("name"), "resume": resume, "bindings": bindings},
     )
+    plan = _copied_plan(skill)
+    _emit_plan_once(run_id, skill)
 
     if not resume:
         for kind in skill.get("hitl_kinds") or []:
             if kind == "outline_confirm" and hitl.should_pause(kind):
                 token = hitl.make_token(kind)
-                prompts = skill.get("hitl_prompts") or {}
-                md = prompts.get(kind) or "请确认后继续。"
+                md = _outline_markdown(skill, plan)
                 if not run.set_state(
                     run_id,
                     "awaiting_hitl",

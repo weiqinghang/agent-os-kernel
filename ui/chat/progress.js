@@ -40,10 +40,41 @@ function writingModelStep(p) {
   return false;
 }
 
+/** 计划卡用的中文短句。不进呼吸白名单，也不在这里改步骤状态。 */
+const PLAN_LIMIT = 5;
+
+function isBusinessLabel(label) {
+  if (label.length > 24) return false;
+  return /^[\u4e00-\u9fff，。、]+$/.test(label);
+}
+
+/**
+ * 只取 kind=plan 里能上屏的 label。状态保持未开始，不根据工具事件猜进度。
+ * 返回 null 表示还没有可显示的步骤。
+ */
+export function projectPlan(events) {
+  let labels = null;
+  for (const ev of events) {
+    if (!ev || ev.kind !== "plan") continue;
+    const steps = Array.isArray(payloadOf(ev).steps) ? payloadOf(ev).steps : [];
+    const clean = [];
+    for (const step of steps) {
+      if (!step || typeof step !== "object" || Array.isArray(step)) continue;
+      const label = typeof step.label === "string" ? step.label.trim() : "";
+      if (!label || !isBusinessLabel(label)) continue;
+      clean.push(label);
+      if (clean.length >= PLAN_LIMIT) break;
+    }
+    if (clean.length) labels = clean;
+  }
+  return labels;
+}
+
 /** 只看 kind 与少量中性字段。不读取 name/tool/mode/id/thinking。 */
 function suggest(ev) {
   const kind = ev && ev.kind;
   const p = payloadOf(ev);
+  if (kind === "plan") return null;
   if (kind === "tool_call") return "正在查询数据";
   if (kind === "assistant") return "正在整理结论";
   if (kind === "hitl") {
