@@ -82,6 +82,7 @@ def release_empty(world):
 
 
 @when("消息接口失败")
+@when("继续请求失败")
 def release_http(world):
     _call(world, {"op": "release", "kind": "httpFail"})
 
@@ -188,8 +189,7 @@ def no_debug_chain(world):
 def debug_whitelist_only(world):
     snap = world["snap"]
     assert snap["chain"] is True
-    lines = [line.strip() for line in snap["chainText"].splitlines() if line.strip()]
-    lines = [line for line in lines if line != "调试链路"]
+    lines = snap["chainLines"]
     assert lines
     assert all(line in WHITELIST for line in lines)
     assert "暂无更多进度" not in lines
@@ -197,7 +197,7 @@ def debug_whitelist_only(world):
 
 @then("调试链路显示暂无更多进度")
 def debug_empty(world):
-    assert "暂无更多进度" in world["snap"]["chainText"]
+    assert world["snap"]["chainLines"] == ["暂无更多进度"]
     assert world["snap"]["leaks"] == []
 
 
