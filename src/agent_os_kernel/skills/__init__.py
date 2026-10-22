@@ -1,5 +1,5 @@
-"""Skills package — manifests only; orchestrator drives execution."""
+"""Skills package — static manifests; orchestrator drives execution."""
 
-from . import insight_report
+from . import insight_report, registry, return_risk_brief
 
-__all__ = ["insight_report"]
+__all__ = ["insight_report", "return_risk_brief", "registry"]

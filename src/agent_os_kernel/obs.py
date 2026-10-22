@@ -43,7 +43,8 @@ def init_db() -> None:
                 updated_at REAL NOT NULL,
                 resume_token TEXT,
                 hitl_kind TEXT,
-                result TEXT
+                result TEXT,
+                context_bindings TEXT
             );
             CREATE TABLE IF NOT EXISTS run_events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -54,6 +55,10 @@ def init_db() -> None:
             );
             """
         )
+        # migrate older DBs missing context_bindings
+        cols = {r[1] for r in c.execute("PRAGMA table_info(runs)").fetchall()}
+        if "context_bindings" not in cols:
+            c.execute("ALTER TABLE runs ADD COLUMN context_bindings TEXT")
 
 
 def emit(run_id: str, kind: str, payload: dict[str, Any] | None = None) -> None:

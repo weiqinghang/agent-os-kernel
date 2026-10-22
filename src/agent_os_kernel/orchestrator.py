@@ -5,11 +5,10 @@ from typing import Any
 
 from . import context, hitl, model_broker, obs, run, session
 from .policy import allow_tool
-from .skills import insight_report
+from .skills import registry
 from .tool_gateway import ToolGateway, ToolGatewayError
 
 MAX_STEPS = 8
-DEFAULT_SKILL = insight_report.SKILL
 
 
 def handle_user_message(
@@ -17,19 +16,25 @@ def handle_user_message(
     run_id: str,
     user_text: str,
     *,
-    skill: dict[str, Any] | None = None,
     resume: bool = False,
 ) -> dict[str, Any]:
     """Drive one user turn (or HITL resume) to completed / failed / awaiting_hitl."""
-    skill = skill or DEFAULT_SKILL
+    rr = run.get_run(run_id) or {}
+    bindings = rr.get("context_bindings") or {}
+    skill_name = bindings.get("skill") or registry.default_name()
+    try:
+        skill = registry.get(skill_name)
+    except KeyError as e:
+        run.set_state(run_id, "failed", result=str(e))
+        return {"status": "failed", "markdown": str(e)}
+
     run.set_state(run_id, "acting")
     obs.emit(
         run_id,
         "state",
-        {"state": "acting", "skill": skill.get("name"), "resume": resume},
+        {"state": "acting", "skill": skill.get("name"), "resume": resume, "bindings": bindings},
     )
 
-    # HITL outline_confirm (skip on resume — already approved)
     if not resume:
         for kind in skill.get("hitl_kinds") or []:
             if kind == "outline_confirm" and hitl.should_pause(kind):
@@ -40,17 +45,14 @@ def handle_user_message(
                     resume_token=token["resume_token"],
                     hitl_kind=kind,
                 )
+                prompts = skill.get("hitl_prompts") or {}
+                md = prompts.get(kind) or "请确认后继续。"
                 obs.emit(
                     run_id,
                     "hitl",
                     {"kind": kind, "auto": False, "resume_token": token["resume_token"]},
                 )
-                return {
-                    "status": "awaiting_hitl",
-                    "hitl": token,
-                    "markdown": "请确认报告大纲（近90天电商销量洞察：类目/渠道/省份/退货）后继续。",
-                    "message": "请确认报告大纲后继续。",
-                }
+                return {"status": "awaiting_hitl", "hitl": token, "markdown": md, "message": md}
             if kind == "outline_confirm":
                 obs.emit(run_id, "hitl", {"kind": kind, "auto": True})
 
@@ -58,15 +60,20 @@ def handle_user_message(
     tool_results: list[dict[str, Any]] = []
     gw = ToolGateway()
     allowed = list(skill.get("allowed_tools") or [])
+    system = context.compose_system(str(skill.get("system_prompt") or ""), bindings)
 
     try:
         for step in range(MAX_STEPS):
             decision = model_broker.decide(
-                system=str(skill.get("system_prompt") or ""),
+                system=system,
                 messages=messages,
                 allowed_tools=allowed,
                 tool_results=tool_results,
+                bindings=bindings,
+                skill_name=skill_name,
             )
+            if decision.pop("_live_fallback", None):
+                obs.emit(run_id, "model_step", {"step": step, "type": "live_fallback_stub", "mode": "stub"})
             dtype = decision.get("type")
             obs.emit(
                 run_id,
@@ -88,9 +95,13 @@ def handle_user_message(
                     arguments = call.get("arguments") or {}
                     if name not in allowed or not allow_tool(name):
                         raise ToolGatewayError(f"tool not allowed by skill/policy: {name}")
-                    out = gw.call(name, arguments)
-                    summary = context.summarize_tool(name, out.get("evidence"), out.get("data") or {})
+                    # Gateway merges bindings defaults; arguments win
+                    out = gw.call(name, arguments, bindings=bindings)
+                    summary = context.summarize_tool(
+                        name, out.get("evidence"), out.get("data") or {}, bindings=bindings
+                    )
                     obs.emit(run_id, "tool_call", summary)
+                    # Keep model/stub-requested args for plan matching; evidence has merged
                     tool_results.append(
                         {
                             "name": name,
@@ -119,6 +130,7 @@ def handle_user_message(
                     "status": "completed",
                     "markdown": md,
                     "evidence": fps,
+                    "context_bindings": bindings,
                 }
 
             raise RuntimeError(f"unknown decision type: {dtype}")
@@ -140,7 +152,6 @@ def resume_after_hitl(run_id: str, user_text: str | None = None) -> dict[str, An
         raise ValueError("run not found")
     sid = rr["session_id"]
     text = user_text or "请继续生成报告"
-    # Ensure there is a user cue on the session for stub intent
     session.add_message(sid, "user", text, run_id=run_id)
     return handle_user_message(sid, run_id, text, resume=True)
 
