@@ -1,6 +1,12 @@
-"""Orchestrator: Run acting loop — Model Broker ↔ Tool Gateway ↔ HITL ↔ Obs."""
+"""Orchestrator: Run acting loop — Model Broker ↔ Tool Gateway ↔ HITL ↔ Obs.
+
+One decide() may list several tool calls. They run in this process, at most
+MAX_PARALLEL_TOOLS at a time, and tool_results are appended in that same order.
+"""
 from __future__ import annotations
 
+import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from . import context, hitl, model_broker, obs, run, session
@@ -9,6 +15,8 @@ from .skills import registry
 from .tool_gateway import ToolGateway, ToolGatewayError
 
 MAX_STEPS = 8
+# Bound for calls returned by a single decide(). Not a cross-step scheduler.
+MAX_PARALLEL_TOOLS = 3
 _ERROR_LIMIT = 180
 
 
@@ -33,18 +41,79 @@ def _tool_failure(name: str, arguments: Any, exc: BaseException) -> dict[str, An
     }
 
 
-def _emit_tool_failure(
-    run_id: str,
+def _elapsed_ms(started: float) -> int:
+    return max(0, int((time.perf_counter() - started) * 1000))
+
+
+def _failure_event(
     name: str,
-    arguments: Any,
     exc: BaseException,
     bindings: dict[str, Any],
+    ms: int,
 ) -> dict[str, Any]:
-    payload: dict[str, Any] = {"tool": name, "ok": False, "error": _short_error(exc)}
+    payload: dict[str, Any] = {"tool": name, "ok": False, "error": _short_error(exc), "ms": ms}
     if bindings:
         payload["bindings_fingerprint"] = context.bindings_fingerprint(bindings)
-    obs.emit(run_id, "tool_call", payload)
-    return _tool_failure(name, arguments, exc)
+    return payload
+
+
+def _perform_tool_call(
+    gw: ToolGateway,
+    call: Any,
+    allowed: list[str],
+    bindings: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Run one call. ToolGatewayError is recoverable; anything else propagates."""
+    started = time.perf_counter()
+    if not isinstance(call, dict):
+        err = ToolGatewayError("tool call must be an object")
+        return _tool_failure("", {}, err), _failure_event("", err, bindings, _elapsed_ms(started))
+    name = str(call.get("name") or "")
+    raw_args = call.get("arguments")
+    if raw_args is None:
+        raw_args = {}
+    try:
+        if not isinstance(raw_args, dict):
+            raise ToolGatewayError("tool arguments must be an object")
+        if name not in allowed or not allow_tool(name):
+            raise ToolGatewayError(f"tool not allowed by skill/policy: {name}")
+        out = gw.call(name, raw_args, bindings=bindings)
+    except ToolGatewayError as exc:
+        return (
+            _tool_failure(name, raw_args, exc),
+            _failure_event(name, exc, bindings, _elapsed_ms(started)),
+        )
+    summary = context.summarize_tool(
+        name, out.get("evidence"), out.get("data") or {}, bindings=bindings
+    )
+    summary["ok"] = True
+    summary["ms"] = _elapsed_ms(started)
+    record = {
+        "name": name,
+        "arguments": raw_args,
+        "ok": True,
+        "data": out.get("data"),
+        "evidence": out.get("evidence"),
+    }
+    return record, summary
+
+
+def _run_tool_batch(
+    run_id: str,
+    gw: ToolGateway,
+    calls: list[Any],
+    allowed: list[str],
+    bindings: dict[str, Any],
+    tool_results: list[dict[str, Any]],
+) -> None:
+    """Run this decide's calls with a bounded pool, then write them back in order."""
+    workers = min(MAX_PARALLEL_TOOLS, len(calls))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = [pool.submit(_perform_tool_call, gw, call, allowed, bindings) for call in calls]
+    for fut in futures:
+        record, event = fut.result()
+        obs.emit(run_id, "tool_call", event)
+        tool_results.append(record)
 
 
 def _emit_broker_events(run_id: str, step: int, decision: dict[str, Any]) -> None:
@@ -137,40 +206,8 @@ def handle_user_message(
                 # A bad call or ToolGatewayError is recoverable: record ok:false and continue.
                 if not calls:
                     raise RuntimeError("model returned empty tool_calls")
-                for call in calls:
-                    if not isinstance(call, dict):
-                        err = ToolGatewayError("tool call must be an object")
-                        tool_results.append(_emit_tool_failure(run_id, "", {}, err, bindings))
-                        continue
-                    name = str(call.get("name") or "")
-                    raw_args = call.get("arguments")
-                    if raw_args is None:
-                        raw_args = {}
-                    try:
-                        if not isinstance(raw_args, dict):
-                            raise ToolGatewayError("tool arguments must be an object")
-                        if name not in allowed or not allow_tool(name):
-                            raise ToolGatewayError(f"tool not allowed by skill/policy: {name}")
-                        # Gateway merges bindings defaults; arguments win
-                        out = gw.call(name, raw_args, bindings=bindings)
-                    except ToolGatewayError as exc:
-                        tool_results.append(_emit_tool_failure(run_id, name, raw_args, exc, bindings))
-                        continue
-                    summary = context.summarize_tool(
-                        name, out.get("evidence"), out.get("data") or {}, bindings=bindings
-                    )
-                    summary["ok"] = True
-                    obs.emit(run_id, "tool_call", summary)
-                    # Keep model/stub-requested args for plan matching; evidence has merged
-                    tool_results.append(
-                        {
-                            "name": name,
-                            "arguments": raw_args,
-                            "ok": True,
-                            "data": out.get("data"),
-                            "evidence": out.get("evidence"),
-                        }
-                    )
+                # Dogfood tools are reads, so the whole batch shares the bound.
+                _run_tool_batch(run_id, gw, calls, allowed, bindings, tool_results)
                 continue
 
             if dtype == "final":
