@@ -13,7 +13,7 @@ Session → Run → Orchestrator → Model Broker → Tool Gateway → HITL → 
                               ↘ stub | live ↗
 ```
 
-- **有 key**（`MODEL_API_KEY` / `XAI_API_KEY` / `OPENAI_API_KEY`）：OpenAI 兼容 chat；默认 base 在有 `XAI_API_KEY` 时为 `https://api.x.ai/v1`，否则 openai；默认模型 `grok-2-latest`（可用 `MODEL_NAME` / `MODEL_BASE_URL` 覆盖）。
+- **有 key**（`MODEL_API_KEY` / `XAI_API_KEY` / `OPENAI_API_KEY`）：OpenAI 兼容 `chat/completions`，请求带 `tools`，工具结果走 `tool` 角色；`tool_calls` 解析成原来的 `calls`。没有原生 `tool_calls` 时仍解析正文里的 JSON。默认 base 在有 `XAI_API_KEY` 时为 `https://api.x.ai/v1`，否则 openai；默认模型 `grok-2-latest`（可用 `MODEL_NAME` / `MODEL_BASE_URL` 覆盖）。
 - **无 key**：`StubBackend` 仍返回结构化 `tool_calls` / `final`；数字只来自 DAS 工具结果 + evidence 指纹。**不是**「技能偷偷拼假报告」。
 - Skill（`insight_report`）只是清单（prompt / 白名单工具 / HITL kinds），**禁止**绕过 orchestrator 直调 DAS。
 
