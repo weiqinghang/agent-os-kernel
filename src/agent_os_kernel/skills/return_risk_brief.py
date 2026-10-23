@@ -195,6 +195,32 @@ def _window_label(bindings: dict[str, Any]) -> str:
     return "近7天"
 
 
+_LAST_30_LABELS = frozenset({"近30天", "last-30", "last30"})
+
+
+def _window_token(bindings: dict[str, Any]) -> str:
+    window = bindings.get("time_window") if isinstance(bindings, dict) else None
+    if isinstance(window, str):
+        raw = window
+    elif isinstance(window, dict):
+        raw = window.get("label") or window.get("id") or window.get("key") or window.get("preset") or ""
+    else:
+        raw = ""
+    return str(raw).strip().lower().replace("_", "-").replace(" ", "")
+
+
+def _is_last_30(bindings: dict[str, Any]) -> bool:
+    """Active window is already the 近30天 / last-30 binding."""
+    return _window_token(bindings) in _LAST_30_LABELS
+
+
+def _closing_line(bindings: dict[str, Any]) -> str:
+    ask = "可追问「第1条依据」"
+    if _is_last_30(bindings):
+        return f"{ask}。"
+    return f"{ask}，或把时间窗改成近30天后再出一版。"
+
+
 def _finding_index(user_text: str) -> int | None:
     matched = re.search(r"第\s*([1-5])\s*条", user_text)
     if matched:
@@ -345,6 +371,30 @@ def _format_rate(value: Any) -> str:
     return f"{rounded:.2f}".rstrip("0").rstrip(".")
 
 
+def _format_gmv(value: Any) -> str:
+    """Money-like sample GMV: 2 decimal places, then drop a long float tail."""
+    if isinstance(value, bool) or value is None:
+        return str(value)
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return text
+        try:
+            number = float(text)
+        except ValueError:
+            return text
+    elif isinstance(value, (int, float)):
+        number = float(value)
+    else:
+        return str(value)
+    if number != number or number in (float("inf"), float("-inf")):
+        return str(value).strip() if isinstance(value, str) else str(value)
+    rounded = round(number, 2)
+    if rounded == int(rounded):
+        return str(int(rounded))
+    return f"{rounded:.2f}".rstrip("0").rstrip(".")
+
+
 def _ranked(tool_results: list[dict[str, Any]]) -> list[dict[str, Any]]:
     found: list[dict[str, Any]] = []
     for group_by, label in _DIMS:
@@ -448,7 +498,7 @@ def _build_report(tool_results: list[dict[str, Any]], bindings: dict[str, Any]) 
         )
         lines.append(f"   - evidence: `{row['fingerprint']}`")
         lines.append("")
-    lines.append("可追问「第1条依据」，或把时间窗改成近30天后再出一版。")
+    lines.append(_closing_line(bindings))
     return "\n".join(lines)
 
 
@@ -715,7 +765,7 @@ def _build_drill(tool_results: list[dict[str, Any]], user_text: str) -> str:
         for offset, record in enumerate(records[:5], 1):
             lines.append(
                 f"{offset}. {record.get('order_id')} · {record.get('category')} · {record.get('channel')} · "
-                f"{record.get('province')} · {record.get('order_date')} · GMV={record.get('gmv')}"
+                f"{record.get('province')} · {record.get('order_date')} · GMV={_format_gmv(record.get('gmv'))}"
             )
     lines += ["", f"_evidence: `{_fp(sample)}`_"]
     return "\n".join(lines)

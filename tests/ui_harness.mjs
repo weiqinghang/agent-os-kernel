@@ -616,6 +616,10 @@ function snapshot() {
     userTexts: Array.from(doc.querySelectorAll(".msg.user .body")).map((el) => el.textContent || ""),
     emptyText: textOf(doc.querySelector(".empty-state")),
     title: textOf(doc.querySelector("h1")),
+    headerText: textOf(doc.querySelector("header")),
+    assistantLabels: Array.from(doc.querySelectorAll("nav.assistants a.assistant")).map((link) =>
+      (link.textContent || "").replace(/\s+/g, " ").trim()
+    ),
     sessionAgent: (win.__lastSessionBody && win.__lastSessionBody.agent_id) || "",
     assistantHrefs: Array.from(doc.querySelectorAll("a.assistant")).map((link) => link.getAttribute("href")),
   };

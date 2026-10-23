@@ -33,3 +33,12 @@ Feature: Return risk assistant Skill#2
     Then 无新增 phase_ 事件 kind
     And Run 状态集合无退货专用态
     And 编排没有退货业务分支
+
+  Scenario: 近30天简报不再劝人改成近30天
+    When 用户在近30天窗口请求退货风险
+    Then 简报不提示把时间窗改成近30天
+    And 近7天简报仍提示可改成近30天
+
+  Scenario: 依据样本的 GMV 不带长尾小数
+    When 用户查看带长尾 GMV 的第 1 条依据
+    Then 样本行 GMV 没有长尾小数

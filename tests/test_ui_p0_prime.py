@@ -472,6 +472,39 @@ def deeplink(world):
     assert "return_risk_brief" not in world["snap"]["body"]
 
 
+@then("顶栏每个助手名至多一次")
+def header_names_once(world):
+    snap = world["snap"]
+    header = snap["headerText"]
+    labels = snap["assistantLabels"]
+    title = snap["title"]
+    assert labels
+    assert len(labels) == len(set(labels))
+    assert title
+    assert title not in labels
+    assert header.count(title) == 1
+    for name in ("洞察报告助理", "退货风险助手"):
+        assert header.count(name) == 1, header
+
+
+@then("顶栏没有第二枚退货名片")
+def no_second_return_card(world):
+    snap = world["snap"]
+    assert snap["title"] == "退货风险助手"
+    assert snap["assistantLabels"].count("退货风险助手") == 0
+    assert snap["headerText"].count("退货风险助手") == 1
+    assert "/?agent=return_risk.brief" not in snap["assistantHrefs"]
+
+
+@then("顶栏没有用量或耗时")
+def no_usage_chrome(world):
+    blob = world["snap"]["headerText"] + "\n" + world["snap"]["emptyText"]
+    assert "usage" not in blob.lower()
+    assert "耗时" not in blob
+    assert "用量" not in blob
+    assert "ms" not in blob.lower()
+
+
 @then(parsers.parse("会话助手是 {agent_id}"))
 def session_agent(world, agent_id):
     assert world["snap"]["sessionAgent"] == agent_id
