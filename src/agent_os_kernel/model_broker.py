@@ -193,6 +193,36 @@ def _context_event(fitted: dict[str, Any]) -> dict[str, Any] | None:
     return event
 
 
+def _coerce_skill_decision(
+    decision: dict[str, Any],
+    *,
+    messages: list[dict[str, Any]],
+    allowed_tools: list[str],
+    tool_results: list[dict[str, Any]],
+    bindings: dict[str, Any],
+    skill_name: str,
+) -> dict[str, Any]:
+    """Let a skill replace a live final. Empty tool_calls are ignored."""
+    from .skills import registry
+
+    coerced = registry.coerce_decision(
+        skill_name,
+        decision=decision,
+        messages=messages,
+        allowed_tools=allowed_tools,
+        tool_results=tool_results,
+        bindings=bindings,
+    )
+    if not isinstance(coerced, dict):
+        return decision
+    dtype = coerced.get("type")
+    if dtype == "tool_calls" and not coerced.get("calls"):
+        return decision
+    if dtype not in ("tool_calls", "final"):
+        return decision
+    return coerced
+
+
 def _attach_context_events(decision: dict[str, Any], events: list[dict[str, Any]]) -> dict[str, Any]:
     if not events:
         return decision
@@ -275,6 +305,14 @@ def decide(
             )
             stub["_broker_events"] = events
             return stub
+        live = _coerce_skill_decision(
+            live,
+            messages=messages,
+            allowed_tools=allowed_tools,
+            tool_results=tool_results,
+            bindings=bindings,
+            skill_name=skill_name,
+        )
         if events:
             live["_broker_events"] = events
         return live

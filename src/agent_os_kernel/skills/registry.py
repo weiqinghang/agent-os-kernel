@@ -16,6 +16,10 @@ _STUB: dict[str, Callable[..., dict[str, Any]]] = {
     "return_risk_brief": return_risk_brief.stub_decide,
 }
 
+_COERCE: dict[str, Callable[..., dict[str, Any]]] = {
+    "return_risk_brief": return_risk_brief.coerce_decision,
+}
+
 DEFAULT_NAME = "insight_report"
 
 
@@ -46,4 +50,13 @@ def list_skills() -> list[dict[str, Any]]:
 
 def stub_decide(skill_name: str, **kwargs: Any) -> dict[str, Any]:
     fn = _STUB.get(skill_name) or _STUB[DEFAULT_NAME]
+    return fn(**kwargs)
+
+
+def coerce_decision(skill_name: str, **kwargs: Any) -> dict[str, Any]:
+    """Skill hook for a live final. Unknown skills return the decision unchanged."""
+    fn = _COERCE.get(skill_name)
+    decision = kwargs.get("decision")
+    if fn is None:
+        return decision if isinstance(decision, dict) else {"type": "final", "content": ""}
     return fn(**kwargs)
