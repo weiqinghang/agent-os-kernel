@@ -252,6 +252,46 @@ def then_redacted(box):
     assert "Tool Gateway" not in shown
 
 
+@when("用户在近30天窗口请求退货风险")
+def when_ask_last_30(box):
+    box["report30"] = _drive("近30天退货风险", bindings=_bindings(time_window=dict(WINDOW30)))
+    box["report7"] = _drive("近7天退货风险")
+
+
+@then("简报不提示把时间窗改成近30天")
+def then_near30_has_no_window_cta(box):
+    content = box["report30"]["content"]
+    assert "退货风险简报（近30天）" in content
+    assert "改成近30天" not in content
+    assert "可追问「第1条依据」。" in content
+
+
+@then("近7天简报仍提示可改成近30天")
+def then_other_window_keeps_cta(box):
+    content = box["report7"]["content"]
+    assert "退货风险简报（近7天）" in content
+    assert "或把时间窗改成近30天后再出一版。" in content
+
+
+@when("用户查看带长尾 GMV 的第 1 条依据")
+def when_long_gmv_drill(box):
+    def canned(call):
+        data = _canned(call)
+        if call.get("name") == "sample_records":
+            data["records"][0]["gmv"] = "934.0200000000"
+        return data
+
+    box["drill"] = _drive("第1条依据是什么", canned=canned)
+
+
+@then("样本行 GMV 没有长尾小数")
+def then_gmv_trimmed(box):
+    content = box["drill"]["content"]
+    assert "GMV=934.02" in content
+    assert "934.0200000000" not in content
+    assert "000000" not in content
+
+
 @when("用户查看第 1 条依据")
 def when_drill_first(box):
     report = _drive("近7天退货风险")
@@ -994,3 +1034,56 @@ def test_live_drill_forces_sample_then_shows_rows(monkeypatch):
         bindings=bindings,
     )
     assert report == {"type": "final", "content": "模型简报"}
+
+
+def test_last30_binding_omits_redundant_window_cta():
+    from agent_os_kernel.skills.return_risk_brief import _build_report, _is_last_30
+
+    stats = _return_stats_results()
+    near30 = _build_report(stats, {"time_window": dict(WINDOW30)})
+    last30 = _build_report(stats, {"time_window": {"label": "last-30", "start": "2025-09-22", "end": "2025-10-22"}})
+    underscored = _build_report(stats, {"time_window": {"label": "last_30"}})
+    week = _build_report(stats, {"time_window": dict(WINDOW7)})
+    quarter = _build_report(stats, {"time_window": {"label": "近90天", "start": "2025-07-25", "end": "2025-10-22"}})
+    for text in (near30, last30, underscored):
+        assert "改成近30天" not in text
+        assert "可追问「第1条依据」。" in text
+    for text in (week, quarter):
+        assert "或把时间窗改成近30天后再出一版。" in text
+        assert "建议先看" in text
+    assert _is_last_30({"time_window": "last-30"})
+    assert _is_last_30({"time_window": {"preset": "Last 30"}})
+    assert _is_last_30({"time_window": {"id": "last_30"}})
+    assert not _is_last_30({"time_window": None})
+    assert not _is_last_30({"time_window": 30})
+    assert not _is_last_30({})
+
+
+def test_sample_line_gmv_trims_long_tail():
+    from agent_os_kernel.skills.return_risk_brief import _build_drill, _format_gmv
+
+    stats = _return_stats_results()
+    sample_args = {
+        "limit": 5,
+        "filters": [{"field": "channel", "operator": "eq", "value": "拼多多"}],
+    }
+    row = {**_pdd_row(), "gmv": "934.0200000000"}
+    shapes = (
+        {"records": [row]},
+        {"result": {"rows": [{**row, "gmv": 934.0200000000}], "row_count": 1}},
+    )
+    for data in shapes:
+        drill = _build_drill(stats + [_tool("sample_records", sample_args, data, "fp-gmv")], "第1条依据是什么")
+        assert "GMV=934.02" in drill
+        assert "934.0200000000" not in drill
+        assert "ORD-PDD-1" in drill
+        assert "拼多多" in drill
+    assert _format_gmv(110) == "110"
+    assert _format_gmv(88.5) == "88.5"
+    assert _format_gmv("不是数字") == "不是数字"
+    assert _format_gmv(None) == "None"
+    assert _format_gmv(True) == "True"
+    assert _format_gmv("") == ""
+    assert _format_gmv(float("nan")) == "nan"
+    assert _format_gmv(float("inf")) == "inf"
+    assert _format_gmv({"n": 1}) == "{'n': 1}"

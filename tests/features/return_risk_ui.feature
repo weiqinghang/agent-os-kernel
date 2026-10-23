@@ -7,6 +7,8 @@ Feature: 退货风险助手入口
     Then 页面出现「问我要一份洞察结论」
     And 开场没有工程话术
     And 页面有退货助手深链
+    And 顶栏每个助手名至多一次
+    And 顶栏没有用量或耗时
     And 会话助手是 insight.report
 
   Scenario: 深链打开退货空态
@@ -19,6 +21,9 @@ Feature: 退货风险助手入口
     And 退货空态没有洞察开场
     And 当前时间窗是「近7天」
     And 会话助手是 return_risk.brief
+    And 顶栏每个助手名至多一次
+    And 顶栏没有第二枚退货名片
+    And 顶栏没有用量或耗时
     And 终端没有技术串
 
   Scenario: 未知助手参数仍回到洞察

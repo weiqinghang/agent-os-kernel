@@ -53,6 +53,23 @@ function assistantFromLocation(win) {
   return ASSISTANTS[id] || ASSISTANTS["insight.report"];
 }
 
+/** 当前助手名只留在标题。切换区不再为深链再叠一枚同名片。 */
+function settleAssistantSwitcher(doc, profile) {
+  const nav = doc.querySelector("nav.assistants");
+  if (!nav) return;
+  const seen = new Set();
+  Array.from(nav.querySelectorAll("a.assistant")).forEach((link) => {
+    const name = (link.textContent || "").replace(/\s+/g, " ").trim();
+    const agent = link.getAttribute("data-agent") || "";
+    const currentCard = agent === profile.id || name === profile.displayName;
+    if (currentCard || !name || seen.has(name)) {
+      link.remove();
+      return;
+    }
+    seen.add(name);
+  });
+}
+
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, (c) => ({
     "&": "&amp;",
@@ -101,11 +118,7 @@ export function boot(doc, win) {
   if (titleEl) titleEl.textContent = profile.displayName;
   if (doc.title != null) doc.title = profile.displayName;
   if (inp) inp.placeholder = profile.placeholder;
-  doc.querySelectorAll("a.assistant").forEach((link) => {
-    const current = link.getAttribute("data-agent") === profile.id;
-    if (current) link.setAttribute("aria-current", "page");
-    else link.removeAttribute("aria-current");
-  });
+  settleAssistantSwitcher(doc, profile);
   setChipActive(chipKey(currentTw));
   refreshMeta();
 
