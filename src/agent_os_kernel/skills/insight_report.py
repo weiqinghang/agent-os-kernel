@@ -6,6 +6,7 @@ import re
 from typing import Any
 
 from ..context import SEED_DATASET_ID
+from .money_fmt import format_gmv
 
 # 计划卡进度只看计数和步骤文案通配，不看工具名。编排不按步骤编号推进。
 PLAN_PROGRESS: list[dict[str, Any]] = [
@@ -99,8 +100,13 @@ def _pick(tool_results: list[dict[str, Any]], name: str, **arg_match: Any) -> di
     return None
 
 
-def _fmt_rows(rows: list[dict[str, Any]], n: int = 5) -> str:
-    return "；".join(f"{r.get('key')}={r.get('value')}" for r in rows[:n])
+def _fmt_rows(rows: list[dict[str, Any]], n: int = 5, *, fmt=None) -> str:
+    def show(value: Any) -> Any:
+        if fmt is None:
+            return value
+        return fmt(value)
+
+    return "；".join(f"{r.get('key')}={show(r.get('value'))}" for r in rows[:n])
 
 
 def _fp(t: dict[str, Any] | None) -> str:
@@ -251,36 +257,37 @@ def _build_report(tool_results: list[dict[str, Any]], bindings: dict[str, Any]) 
     top_ch = (by_ch.get("rows") or [{}])[0]
     top_prov = (by_prov.get("rows") or [{}])[0]
     worst_ret = (ret_ch.get("rows") or [{}])[0]
+    start = tw.get("start") if isinstance(tw, dict) else "?"
+    end = tw.get("end") if isinstance(tw, dict) else "?"
     lines = [
         f"# 电商销量洞察报告（{label}）",
         "",
-        f"**范围**：dataset=`{bindings.get('dataset')}`；"
-        f"时间窗 {tw.get('start') if isinstance(tw, dict) else '?'} ~ "
-        f"{tw.get('end') if isinstance(tw, dict) else '?'}（{label}）。",
+        f"**范围**：本批销量数据 {bindings.get('dataset')}；"
+        f"时间窗 {start} ~ {end}（{label}）。",
         f"**数据概览**：共 {desc.get('row_count', summary.get('filtered_rows', '—'))} 行；"
         f"日期 {summary.get('min_date')} ~ {summary.get('max_date')}；"
-        f"总 GMV ≈ {summary.get('total_gmv')}；整体退货率 {summary.get('return_pct')}%。",
+        f"总 GMV ≈ {format_gmv(summary.get('total_gmv'))}；整体退货率 {summary.get('return_pct')}%。",
         f"_evidence: {_fp(desc_t)}_",
         "",
         "## 发现",
         "",
-        f"1. **类目集中**：GMV 最高类目为 **{top_cat.get('key')}**（{top_cat.get('value')}）。"
-        f" Top：{_fmt_rows(by_cat.get('rows') or [])}。",
+        f"1. **类目集中**：GMV 最高类目为 **{top_cat.get('key')}**（{format_gmv(top_cat.get('value'))}）。"
+        f" Top：{_fmt_rows(by_cat.get('rows') or [], fmt=format_gmv)}。",
         f"   - evidence: `{_fp(_pick(tool_results, 'query_stats', group_by='category', metric='sum_gmv'))}`",
         "",
-        f"2. **渠道结构**：GMV 最高渠道为 **{top_ch.get('key')}**（{top_ch.get('value')}）。"
-        f" Top：{_fmt_rows(by_ch.get('rows') or [])}。",
+        f"2. **渠道结构**：GMV 最高渠道为 **{top_ch.get('key')}**（{format_gmv(top_ch.get('value'))}）。"
+        f" Top：{_fmt_rows(by_ch.get('rows') or [], fmt=format_gmv)}。",
         f"   - evidence: `{_fp(_pick(tool_results, 'query_stats', group_by='channel', metric='sum_gmv'))}`",
         "",
-        f"3. **区域贡献**：GMV 最高省份为 **{top_prov.get('key')}**（{top_prov.get('value')}）。"
-        f" Top：{_fmt_rows(by_prov.get('rows') or [])}。",
+        f"3. **区域贡献**：GMV 最高省份为 **{top_prov.get('key')}**（{format_gmv(top_prov.get('value'))}）。"
+        f" Top：{_fmt_rows(by_prov.get('rows') or [], fmt=format_gmv)}。",
         f"   - evidence: `{_fp(_pick(tool_results, 'query_stats', group_by='province', metric='sum_gmv'))}`",
         "",
         f"4. **退货风险**：按渠道退货率最高为 **{worst_ret.get('key')}**（{worst_ret.get('value')}%）。",
         f"   - evidence: `{_fp(_pick(tool_results, 'query_stats', group_by='channel', metric='return_rate'))}`",
         "",
         "---",
-        "_数字均来自 Tool Gateway；可追问「第2条依据/样本」下钻，或改时间窗后重跑。_",
+        "_可追问第 2 条依据下钻，或改时间窗后再出一版。_",
     ]
     return "\n".join(lines)
 
@@ -310,7 +317,7 @@ def _build_drill(tool_results: list[dict[str, Any]], user_text: str = "") -> str
         for i, r in enumerate(recs[:5], 1):
             lines.append(
                 f"{i}. {r.get('order_id')} · {r.get('category')} · {r.get('channel')} · "
-                f"{r.get('province')} · {r.get('order_date')} · GMV={r.get('gmv')}"
+                f"{r.get('province')} · {r.get('order_date')} · GMV={format_gmv(r.get('gmv'))}"
             )
     lines += ["", f"_evidence: `{fp}`_"]
     return "\n".join(lines)
@@ -332,9 +339,11 @@ def _build_followup(intent: str, tool_results: list[dict[str, Any]]) -> str:
     }
     title, unit = labels.get(intent, ("汇总", ""))
     suffix = "%" if intent == "return" else ""
+    amount = intent != "return"
+    top_value = format_gmv(top.get("value")) if amount else top.get("value")
     return (
-        f"**{title}**（最高：**{top.get('key')}**，{unit}={top.get('value')}{suffix}）\n\n"
-        f"{_fmt_rows(rows, 8)}\n\n"
+        f"**{title}**（最高：**{top.get('key')}**，{unit}={top_value}{suffix}）\n\n"
+        f"{_fmt_rows(rows, 8, fmt=format_gmv if amount else None)}\n\n"
         f"_evidence: `{fp}`_"
     )
 
