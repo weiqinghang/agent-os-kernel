@@ -60,6 +60,19 @@ def _seed_module():
     return module
 
 
+def _payload_records(data):
+    if not isinstance(data, dict):
+        return []
+    for key in ("records", "rows", "items"):
+        raw = data.get(key)
+        if isinstance(raw, list) and raw and isinstance(raw[0], dict):
+            return [row for row in raw if isinstance(row, dict)]
+    nested = data.get("result")
+    if isinstance(nested, dict):
+        return _payload_records(nested)
+    return []
+
+
 def _drive(text, bindings=None, canned=None):
     bindings = bindings or _bindings()
     tool_results = []
@@ -78,7 +91,7 @@ def _drive(text, bindings=None, canned=None):
         for call in decision["calls"]:
             data = (canned or _canned)(call)
             if call["name"] == "sample_records":
-                samples.extend((data.get("records") or []))
+                samples.extend(_payload_records(data))
             tool_results.append(
                 _tool(call["name"], call.get("arguments") or {}, data, "fp-" + call["name"])
             )
@@ -501,6 +514,8 @@ def test_skill_edges_cover_focus_drill_and_empty():
     assert "推迟" not in SKILL["system_prompt"]
     assert "偏高" in SKILL["system_prompt"]
     assert "avg_returned" in SKILL["system_prompt"]
+    assert "rows" in SKILL["system_prompt"]
+    assert "必须先调用 sample_records" in SKILL["system_prompt"]
     assert "metric return_rate" not in SKILL["system_prompt"]
     assert SKILL["hitl_kinds"] == ["outline_confirm"]
     assert 1 <= len(SKILL["plan_steps"]) <= 5
@@ -681,3 +696,301 @@ def test_fake_das_near7_avg_returned_brief(tmp_path, monkeypatch):
     assert "第1条依据" in shown["content"]
     assert "拼多多" in shown["content"]
     assert "没有抽到" not in shown["content"]
+
+
+def _return_stats_results():
+    def stats(group_by, rows):
+        return _tool(
+            "query_stats",
+            {
+                "group_by": [group_by],
+                "metrics": [{"function": "avg", "field": "returned", "alias": "avg_returned"}],
+            },
+            {"rows": rows},
+            "fp-" + group_by,
+        )
+
+    return [
+        stats("channel", [{"channel": "拼多多", "avg_returned": 0.1309}]),
+        stats("province", [{"province": "辽宁", "avg_returned": 0.0837}]),
+        stats("category", [{"category": "电子产品", "avg_returned": 0.0775}]),
+    ]
+
+
+def _pdd_row():
+    return {
+        "order_id": "ORD-PDD-1",
+        "category": "电子产品",
+        "channel": "拼多多",
+        "province": "辽宁",
+        "order_date": "2025-10-20",
+        "gmv": 88,
+    }
+
+
+def test_drill_and_focus_read_rows_and_records():
+    from agent_os_kernel.skills.return_risk_brief import _build_drill, _build_focus
+
+    stats = _return_stats_results()
+    sample_args = {
+        "limit": 5,
+        "filters": [
+            {"field": "order_date", "operator": "gte", "value": "2025-10-15"},
+            {"field": "order_date", "operator": "lte", "value": "2025-10-22"},
+            {"field": "channel", "operator": "eq", "value": "拼多多"},
+        ],
+    }
+    row = _pdd_row()
+    shapes = [
+        {"count": 1, "records": [row]},
+        {"row_count": 5, "rows": [row, {**row, "order_id": "ORD-PDD-2"}]},
+        {"records": [], "rows": [row]},
+        {"result": {"rows": [row], "row_count": 1}},
+        {
+            "columns": ["order_id", "category", "channel", "province", "order_date", "gmv"],
+            "rows": [["ORD-PDD-1", "电子产品", "拼多多", "辽宁", "2025-10-20", 88]],
+        },
+        {"rows": [{"order_id": "ORD-PDD-1", "category": "电子产品", "gmv": 88, "province": "辽宁", "order_date": "2025-10-20"}]},
+        {"items": [row]},
+        {
+            "rows": [
+                {
+                    "values": {
+                        "order_id": "ORD-PDD-1",
+                        "category": "电子产品",
+                        "channel": "拼多多",
+                        "province": "辽宁",
+                        "order_date": "2025-10-20",
+                        "gmv": 88,
+                    }
+                }
+            ]
+        },
+    ]
+    for data in shapes:
+        sample = _tool("sample_records", sample_args, data, "fp-sample")
+        drill = _build_drill(stats + [sample], "第1条依据是什么")
+        assert "第1条依据" in drill
+        assert "ORD-PDD-1" in drill
+        assert "拼多多" in drill
+        assert "没有抽到" not in drill
+        focus = _build_focus(stats + [sample], "只看拼多多")
+        assert "ORD-PDD-1" in focus
+        assert "拼多多" in focus
+        assert "没有抽到这个范围的样本" not in focus
+
+    empty = _tool("sample_records", sample_args, {"rows": [], "row_count": 0}, "fp-empty")
+    drill_empty = _build_drill(stats + [empty], "第1条依据是什么")
+    focus_empty = _build_focus(stats + [empty], "只看拼多多")
+    assert "没有抽到与这条风险对齐的样本" in drill_empty
+    assert "这个时间窗里没有这类行" in drill_empty
+    assert "ORD-PDD-1" not in drill_empty
+    assert "没有抽到这个范围的样本" in focus_empty
+    assert "这个时间窗里没有这类行" in focus_empty
+
+    wrong = _tool(
+        "search_records",
+        {"filters": [{"field": "channel", "operator": "eq", "value": "京东"}]},
+        {"rows": [{**row, "channel": "京东", "order_id": "ORD-JD-1"}]},
+        "fp-jd",
+    )
+    right = _tool("sample_records", sample_args, {"rows": [row]}, "fp-pdd")
+    mixed = _build_drill(stats + [wrong, right], "第1条依据是什么")
+    assert "ORD-PDD-1" in mixed
+    assert "ORD-JD-1" not in mixed
+    only_wrong = _build_drill(stats + [wrong], "第1条依据是什么")
+    assert "没有抽到" in only_wrong
+    assert "ORD-JD-1" not in only_wrong
+
+
+def test_stub_drill_renders_das_rows():
+    def canned(call):
+        if call.get("name") == "sample_records":
+            filters = _flat_filters(call.get("arguments") or {})
+            return {
+                "row_count": 1,
+                "rows": [
+                    {
+                        "order_id": "ORD-PDD-7",
+                        "category": "电子产品",
+                        "channel": filters.get("channel", "拼多多"),
+                        "province": "辽宁",
+                        "order_date": "2025-10-18",
+                        "gmv": 41,
+                    }
+                ],
+            }
+        return _canned(call)
+
+    drill = _drive("第1条依据是什么", canned=canned)
+    assert "第1条依据" in drill["content"]
+    assert "ORD-PDD-7" in drill["content"]
+    assert "拼多多" in drill["content"]
+    assert "没有抽到" not in drill["content"]
+    assert drill["samples"]
+    assert all(item["channel"] == "拼多多" for item in drill["samples"])
+    focus = _drive("只看拼多多", canned=canned)
+    assert "ORD-PDD-7" in focus["content"]
+    assert "拼多多" in focus["content"]
+    assert "退货率" in focus["content"]
+    assert "没有抽到这个范围的样本" not in focus["content"]
+
+
+def test_http_drill_shows_das_rows(box):
+    def call(self, name, arguments=None, *, bindings=None):
+        del self, bindings
+        arguments = arguments or {}
+        if name == "sample_records":
+            filters = _flat_filters(arguments)
+            return {
+                "data": {
+                    "row_count": 1,
+                    "rows": [
+                        {
+                            "order_id": "ORD-PDD-9",
+                            "category": "电子产品",
+                            "channel": filters.get("channel", "拼多多"),
+                            "province": "辽宁",
+                            "order_date": "2025-10-20",
+                            "gmv": 19,
+                        }
+                    ],
+                },
+                "evidence": {"fingerprint": "fp-rows"},
+            }
+        return {"data": _canned({"name": name, "arguments": arguments}), "evidence": {"fingerprint": "fp"}}
+
+    box["monkeypatch"].setattr(ToolGateway, "call", call)
+    with TestClient(app) as client:
+        created = client.post("/sessions", json={"agent_id": "return_risk.brief"}).json()
+        drill = _wait_turn(
+            client,
+            client.post(f"/sessions/{created['id']}/messages", json={"text": "第1条依据是什么"}).json(),
+        )
+        assert drill["state"] == "completed"
+        assert "ORD-PDD-9" in drill["result"]
+        assert "拼多多" in drill["result"]
+        assert "没有抽到" not in drill["result"]
+        focus = _wait_turn(
+            client,
+            client.post(f"/sessions/{created['id']}/messages", json={"text": "只看拼多多"}).json(),
+        )
+        assert focus["state"] == "completed"
+        assert focus["id"] != drill["id"]
+        assert "ORD-PDD-9" in focus["result"]
+        assert "拼多多" in focus["result"]
+        assert "没有抽到这个范围的样本" not in focus["result"]
+
+
+def test_live_drill_forces_sample_then_shows_rows(monkeypatch):
+    from agent_os_kernel.skills.return_risk_brief import coerce_decision
+
+    monkeypatch.setattr(model_broker, "has_llm", lambda: True)
+    monkeypatch.setenv("MODEL_API_KEY", "test-key")
+    monkeypatch.setattr(
+        model_broker._LiveBackend,
+        "decide",
+        staticmethod(lambda **kwargs: {"type": "final", "content": "我先不抽样"}),
+    )
+    stats = _return_stats_results()
+    bindings = _bindings()
+    allowed = list(SKILL["allowed_tools"])
+    forced = model_broker.decide(
+        system="sys",
+        messages=[{"role": "user", "content": "第1条依据是什么"}],
+        allowed_tools=allowed,
+        tool_results=stats,
+        bindings=bindings,
+        skill_name="return_risk_brief",
+    )
+    assert forced["type"] == "tool_calls"
+    sample_call = next(call for call in forced["calls"] if call["name"] == "sample_records")
+    assert {"field": "channel", "operator": "eq", "value": "拼多多"} in sample_call["arguments"]["filters"]
+
+    shown = coerce_decision(
+        decision={"type": "final", "content": "没有抽到样本"},
+        messages=[{"role": "user", "content": "第1条依据是什么"}],
+        allowed_tools=allowed,
+        tool_results=stats
+        + [
+            _tool(
+                "sample_records",
+                {"dataset_id": "ignored", "limit": 5, "filters": [{"field": "channel", "operator": "eq", "value": "拼多多"}]},
+                {"rows": [_pdd_row()]},
+                "fp-live",
+            )
+        ],
+        bindings=bindings,
+    )
+    assert shown["type"] == "final"
+    assert "ORD-PDD-1" in shown["content"]
+    assert "拼多多" in shown["content"]
+    assert "没有抽到" not in shown["content"]
+
+    focus_forced = model_broker.decide(
+        system="sys",
+        messages=[{"role": "user", "content": "只看拼多多"}],
+        allowed_tools=allowed,
+        tool_results=stats,
+        bindings=bindings,
+        skill_name="return_risk_brief",
+    )
+    assert focus_forced["type"] == "tool_calls"
+    focus_sample = next(call for call in focus_forced["calls"] if call["name"] == "sample_records")
+    assert {"field": "channel", "operator": "eq", "value": "拼多多"} in focus_sample["arguments"]["filters"]
+    focus_shown = coerce_decision(
+        decision={"type": "final", "content": "没有抽到这个范围的样本"},
+        messages=[{"role": "user", "content": "只看拼多多"}],
+        allowed_tools=allowed,
+        tool_results=stats
+        + [
+            _tool(
+                "sample_records",
+                {"limit": 5, "filters": {"channel": "拼多多"}},
+                {"rows": [_pdd_row()]},
+                "fp-focus",
+            )
+        ],
+        bindings=bindings,
+    )
+    assert "ORD-PDD-1" in focus_shown["content"]
+    assert "没有抽到这个范围的样本" not in focus_shown["content"]
+    kept = {"type": "tool_calls", "calls": [{"name": "query_stats", "arguments": {}}]}
+    assert (
+        coerce_decision(
+            decision=kept,
+            messages=[{"role": "user", "content": "第1条依据是什么"}],
+            allowed_tools=allowed,
+            tool_results=stats,
+            bindings=bindings,
+        )
+        is kept
+    )
+    unknown = coerce_decision(
+        decision={"type": "final", "content": "原话"},
+        messages=[{"role": "user", "content": "只看不存在的柜面"}],
+        allowed_tools=allowed,
+        tool_results=stats,
+        bindings=bindings,
+    )
+    assert unknown["content"] == "原话"
+
+    untouched = model_broker.decide(
+        system="sys",
+        messages=[{"role": "user", "content": "第1条依据是什么"}],
+        allowed_tools=allowed,
+        tool_results=[],
+        bindings={"skill": "insight_report", "dataset": "ecommerce_sales_v2"},
+        skill_name="insight_report",
+    )
+    assert untouched["type"] == "final"
+    assert untouched["content"] == "我先不抽样"
+
+    report = coerce_decision(
+        decision={"type": "final", "content": "模型简报"},
+        messages=[{"role": "user", "content": "近7天退货风险"}],
+        allowed_tools=allowed,
+        tool_results=stats,
+        bindings=bindings,
+    )
+    assert report == {"type": "final", "content": "模型简报"}

@@ -50,7 +50,12 @@ SKILL: dict[str, Any] = {
         " 行上的 avg_returned 是 0 到 1 的比例，写成百分数后按从高到低给出 3 到 5 条。"
         " sample_records / search_records 要带非空 return_fields"
         "（order_id、sku、category、channel、province、order_date、qty、gmv、returned）；"
-        "缺省时网关会补上这组字段。用户要看第 N 条依据时，样本必须落在该条的渠道、类目或省上。"
+        "缺省时网关会补上这组字段。用户要看第 N 条依据，或只看某个渠道、类目、省时，"
+        "必须先调用 sample_records：filters 用该维度 eq，并带上 order_date 时间窗。"
+        "没有这次 sample_records 或 search_records 结果时，禁止直接 final。"
+        "样本行在工具结果的 rows 或 records 里（有的在 result.rows），"
+        "final 至少列出一条，渠道、类目或省与该条风险一致。"
+        "只有该时间窗确实没有行时，才说明没有抽到样本。"
         "标题使用「退货风险简报」并原文引用 time_window.label。"
     ),
     "allowed_tools": list(_ALLOWED),
@@ -447,6 +452,237 @@ def _build_report(tool_results: list[dict[str, Any]], bindings: dict[str, Any]) 
     return "\n".join(lines)
 
 
+_SAMPLE_FIELDS = (
+    "order_id",
+    "sku",
+    "category",
+    "channel",
+    "province",
+    "order_date",
+    "qty",
+    "gmv",
+    "returned",
+)
+_RECORD_LIST_KEYS = ("records", "rows", "items")
+_RECORD_COUNT_KEYS = ("count", "row_count", "total", "returned_row_count")
+
+
+def _eq_filters(arguments: dict[str, Any]) -> dict[str, Any]:
+    filters = arguments.get("filters")
+    found: dict[str, Any] = {}
+    if isinstance(filters, dict):
+        clauses = filters.get("clauses") or filters.get("conditions")
+        if isinstance(clauses, list):
+            filters = clauses
+        else:
+            for key, value in filters.items():
+                if key not in {"op", "clauses", "operator", "conditions"}:
+                    found[str(key)] = value
+            return found
+    if isinstance(filters, list):
+        for clause in filters:
+            if not isinstance(clause, dict) or not clause.get("field"):
+                continue
+            op = clause.get("operator") or clause.get("op") or "eq"
+            if op == "eq":
+                found[str(clause["field"])] = clause.get("value")
+    return found
+
+
+def _column_names(columns: list[Any]) -> list[str]:
+    names: list[str] = []
+    for col in columns:
+        if isinstance(col, str) and col.strip():
+            names.append(col.strip())
+            continue
+        if isinstance(col, dict):
+            label = col.get("name") or col.get("field")
+            if isinstance(label, str) and label.strip():
+                names.append(label.strip())
+    return names
+
+
+def _coerce_record(row: Any, columns: list[Any] | None) -> dict[str, Any] | None:
+    if isinstance(row, dict):
+        if any(row.get(field) not in (None, "") for field in _SAMPLE_FIELDS):
+            return row
+        for key in ("record", "fields", "values", "data"):
+            nested = row.get(key)
+            if isinstance(nested, dict):
+                merged = dict(nested)
+                for field in _SAMPLE_FIELDS:
+                    if row.get(field) not in (None, "") and field not in merged:
+                        merged[field] = row[field]
+                return merged
+        return row
+    if isinstance(row, (list, tuple)) and columns:
+        names = _column_names(columns)
+        if not names:
+            return None
+        return {names[index]: row[index] for index in range(min(len(names), len(row)))}
+    return None
+
+
+def _list_records(data: dict[str, Any]) -> list[dict[str, Any]] | None:
+    columns = data.get("columns") or data.get("fields") or data.get("return_fields")
+    if not isinstance(columns, list):
+        columns = None
+    saw_list = False
+    for key in _RECORD_LIST_KEYS:
+        raw = data.get(key)
+        if not isinstance(raw, list):
+            continue
+        saw_list = True
+        parsed = [
+            item
+            for item in (_coerce_record(row, columns) for row in raw)
+            if isinstance(item, dict)
+        ]
+        if parsed:
+            return parsed
+    if saw_list:
+        return []
+    return None
+
+
+def _record_rows(sample: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """Sample payload. Fake DAS uses records; live DAS uses rows (sometimes under result)."""
+    data = (sample or {}).get("data") or {}
+    if not isinstance(data, dict):
+        return []
+    direct = _list_records(data)
+    if direct:
+        return direct
+    nested = data.get("result")
+    if isinstance(nested, dict):
+        inner = _list_records(nested)
+        if inner:
+            return inner
+    return direct or []
+
+
+def _sample_total(sample: dict[str, Any] | None, records: list[dict[str, Any]]) -> int:
+    data = (sample or {}).get("data") or {}
+    blobs: list[Any] = [data]
+    if isinstance(data, dict) and isinstance(data.get("result"), dict):
+        blobs.append(data["result"])
+    for blob in blobs:
+        if not isinstance(blob, dict):
+            continue
+        for key in _RECORD_COUNT_KEYS:
+            value = blob.get(key)
+            if isinstance(value, bool):
+                continue
+            if isinstance(value, int):
+                return value
+            if isinstance(value, float) and value.is_integer():
+                return int(value)
+    return len(records)
+
+
+def _with_filter_defaults(
+    records: list[dict[str, Any]],
+    arguments: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    flat = _eq_filters(arguments or {})
+    if not flat:
+        return records
+    filled: list[dict[str, Any]] = []
+    for record in records:
+        item = dict(record)
+        for field, value in flat.items():
+            if item.get(field) in (None, ""):
+                item[field] = value
+        filled.append(item)
+    return filled
+
+
+def _aligned(
+    records: list[dict[str, Any]],
+    group_by: str | None,
+    key: str | None,
+) -> list[dict[str, Any]]:
+    if not records:
+        return []
+    if not group_by or key is None:
+        return records
+    matched = [row for row in records if str(row.get(group_by) or "") == str(key)]
+    if matched:
+        return matched
+    if all(row.get(group_by) in (None, "") for row in records):
+        return records
+    return []
+
+
+def _sample_for(
+    tool_results: list[dict[str, Any]],
+    group_by: str | None = None,
+    key: str | None = None,
+) -> dict[str, Any]:
+    candidates = [
+        item
+        for item in tool_results
+        if item.get("name") in ("sample_records", "search_records")
+    ]
+    if not candidates:
+        return {}
+
+    def fits(item: dict[str, Any]) -> bool:
+        if not group_by or key is None:
+            return False
+        return _eq_filters(item.get("arguments") or {}).get(group_by) == key
+
+    def usable(item: dict[str, Any]) -> list[dict[str, Any]]:
+        rows = _with_filter_defaults(_record_rows(item), item.get("arguments") or {})
+        return _aligned(rows, group_by, key)
+
+    filtered = [item for item in candidates if fits(item) and usable(item)]
+    if filtered:
+        return filtered[-1]
+    any_rows = [item for item in candidates if usable(item)]
+    if any_rows:
+        return any_rows[-1]
+    matched = [item for item in candidates if fits(item)]
+    if matched:
+        return matched[-1]
+    return candidates[-1]
+
+
+def _visible_records(
+    sample: dict[str, Any],
+    group_by: str | None,
+    key: str | None,
+) -> list[dict[str, Any]]:
+    rows = _with_filter_defaults(_record_rows(sample), sample.get("arguments") or {})
+    return _aligned(rows, group_by, key)
+
+
+def _hotspot(
+    intent: str,
+    user_text: str,
+    tool_results: list[dict[str, Any]],
+) -> tuple[str, str] | None:
+    if intent == "drill":
+        index = _finding_index(user_text)
+        ranked = _ranked(tool_results)
+        if index and 1 <= index <= len(ranked):
+            row = ranked[index - 1]
+            return str(row["group_by"]), str(row["key"])
+        if index is None:
+            return _named_focus(user_text)
+        return None
+    return _named_focus(user_text)
+
+
+def _has_aligned_rows(
+    tool_results: list[dict[str, Any]],
+    hotspot: tuple[str, str],
+) -> bool:
+    group_by, key = hotspot
+    sample = _sample_for(tool_results, group_by, key)
+    return bool(_visible_records(sample, group_by, key))
+
+
 def _build_drill(tool_results: list[dict[str, Any]], user_text: str) -> str:
     index = _finding_index(user_text)
     ranked = _ranked(tool_results)
@@ -463,16 +699,18 @@ def _build_drill(tool_results: list[dict[str, Any]], user_text: str) -> str:
             group_by, key = named
             label = dict(_DIMS).get(group_by, group_by)
             row = {"group_by": group_by, "label": label, "key": key, "value": None}
+    group_by = row["group_by"] if row else None
+    key = row["key"] if row else None
     if row:
         lines.append(f"这条风险讲的是{row['label']} **{row['key']}**。下面只列出「{row['key']}」的样本。")
         lines.append("")
-    sample = _pick(tool_results, "sample_records") or _pick(tool_results, "search_records") or {}
-    data = sample.get("data") or {}
-    records = data.get("records") or []
+    sample = _sample_for(tool_results, group_by, key)
+    records = _visible_records(sample, group_by, key)
     if not records:
-        lines.append("没有抽到与这条风险对齐的样本。")
+        lines.append("没有抽到与这条风险对齐的样本。这个时间窗里没有这类行。")
     else:
-        lines.append(f"共 {data.get('count', len(records))} 条样本（展示前 {min(5, len(records))}）：")
+        total = _sample_total(sample, records)
+        lines.append(f"共 {total} 条样本（展示前 {min(5, len(records))}）：")
         lines.append("")
         for offset, record in enumerate(records[:5], 1):
             lines.append(
@@ -501,14 +739,14 @@ def _build_focus(tool_results: list[dict[str, Any]], user_text: str) -> str:
     label = dict(_DIMS).get(group_by, group_by)
     rate = _rate_for(tool_results, group_by, key)
     rate_text = f"退货率 {_format_rate(rate)}%，" if rate is not None else ""
-    sample = _pick(tool_results, "sample_records") or {}
-    records = (sample.get("data") or {}).get("records") or []
+    sample = _sample_for(tool_results, group_by, key)
+    records = _visible_records(sample, group_by, key)
     lines = [
         f"**{key}** {rate_text}建议先看这个{label}。",
         "",
     ]
     if not records:
-        lines.append("没有抽到这个范围的样本。")
+        lines.append("没有抽到这个范围的样本。这个时间窗里没有这类行。")
     else:
         lines.append("样本：")
         for record in records[:5]:
@@ -546,3 +784,38 @@ def stub_decide(
     if intent == "focus" and _named_focus(user_text):
         return {"type": "final", "content": _build_focus(tool_results, user_text)}
     return {"type": "final", "content": _build_report(tool_results, bindings)}
+
+
+def coerce_decision(
+    *,
+    decision: dict[str, Any],
+    messages: list[dict[str, Any]],
+    allowed_tools: list[str],
+    tool_results: list[dict[str, Any]],
+    bindings: dict[str, Any],
+) -> dict[str, Any]:
+    """Live final for drill/focus still has to sample, then show rows or records."""
+    if decision.get("type") != "final":
+        return decision
+    user_text = _last_user(messages)
+    intent = _intent(user_text)
+    if intent not in ("drill", "focus"):
+        return decision
+    if intent == "focus" and _named_focus(user_text) is None:
+        return decision
+    hotspot = _hotspot(intent, user_text, tool_results)
+    if hotspot and _has_aligned_rows(tool_results, hotspot):
+        if intent == "drill":
+            return {"type": "final", "content": _build_drill(tool_results, user_text)}
+        return {"type": "final", "content": _build_focus(tool_results, user_text)}
+    stub = stub_decide(
+        messages=messages,
+        allowed_tools=allowed_tools,
+        tool_results=tool_results,
+        bindings=bindings,
+    )
+    if stub.get("type") == "tool_calls" and stub.get("calls"):
+        return {"type": "tool_calls", "calls": list(stub["calls"])}
+    if stub.get("type") == "final" and isinstance(stub.get("content"), str):
+        return {"type": "final", "content": stub["content"]}
+    return decision
