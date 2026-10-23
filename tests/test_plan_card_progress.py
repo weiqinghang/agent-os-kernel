@@ -94,7 +94,9 @@ def test_progress_finalizing_cancel_and_dirty_rules():
         got = apply_plan_progress(_STEPS, [{"kind": "model_step", "payload": payload}])
         assert got[-1]["status"] == "active"
     assert apply_plan_progress(_STEPS, [{"kind": "assistant", "payload": {}}])[-1]["status"] == "active"
-    assert apply_plan_progress(_STEPS, [{"kind": "state", "payload": {"state": "completed"}}])[-1]["status"] == "active"
+    settled = apply_plan_progress(_STEPS, [{"kind": "state", "payload": {"state": "completed"}}])
+    assert settled[-1]["status"] == "done"
+    assert {step["status"] for step in settled[:-1]} == {"skipped"}
     assert apply_plan_progress(_STEPS, [{"kind": "state", "payload": {"state": "finalizing"}}])[-1]["status"] == "active"
     failed_after = [
         {"kind": "model_step", "payload": {"type": "final"}},
@@ -156,6 +158,21 @@ def test_progress_finalizing_cancel_and_dirty_rules():
         [{"when": "tool_calls", "count": 1, "label": "*范围*"}],
     )
     assert no_gate[0]["status"] == "done"
+
+
+def test_completed_return_risk_plan_settles():
+    from agent_os_kernel.skills.return_risk_brief import PLAN_PROGRESS as RISK_RULES
+    from agent_os_kernel.skills.return_risk_brief import SKILL as RISK
+
+    events = [
+        {"kind": "tool_call", "payload": {"ok": True}},
+        {"kind": "tool_call", "payload": {"ok": True}},
+        {"kind": "assistant", "payload": {}},
+        {"kind": "state", "payload": {"state": "completed"}},
+    ]
+    got = apply_plan_progress(RISK["plan_steps"], events, RISK_RULES)
+    assert [step["status"] for step in got] == ["done", "done", "skipped", "skipped", "done"]
+    assert {step["status"] for step in got} <= {"done", "skipped"}
 
 
 def test_js_rule_table_matches_skill():

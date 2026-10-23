@@ -42,7 +42,12 @@ SKILL: dict[str, Any] = {
         " filters 是 {field, operator, value} 数组，时间窗用 order_date 的 gte/lte；"
         " metrics 是 {function, field, alias} 数组（function 为 sum/avg/count 等）；"
         " group_by 是字段名数组。不要传 name、dataset、start、end 或 metric 字符串。"
-        " 退货率用 metric return_rate，按 channel、category、province 分别聚合后排序。"
+        " 退货不要用名叫 return_rate 的指标。query_stats 的 metrics 用"
+        " {\"function\":\"avg\",\"field\":\"returned\",\"alias\":\"avg_returned\"}"
+        "（要笔数时再加 {\"function\":\"sum\",\"field\":\"returned\",\"alias\":\"sum_returned\"}）；"
+        " group_by 用 [\"channel\"]、[\"category\"] 或 [\"province\"]；"
+        " 时间窗写进 filters 的 order_date gte/lte。"
+        " 行上的 avg_returned 是 0 到 1 的比例，写成百分数后按从高到低给出 3 到 5 条。"
         " sample_records / search_records 要带非空 return_fields"
         "（order_id、sku、category、channel、province、order_date、qty、gmv、returned）；"
         "缺省时网关会补上这组字段。用户要看第 N 条依据时，样本必须落在该条的渠道、类目或省上。"
@@ -143,9 +148,39 @@ def _tw_args(bindings: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
-def _base_args(bindings: dict[str, Any]) -> dict[str, Any]:
-    tw = _tw_args(bindings)
-    return {key: tw[key] for key in ("start", "end") if key in tw}
+_RETURN_METRICS: list[dict[str, str]] = [
+    {"function": "avg", "field": "returned", "alias": "avg_returned"},
+]
+
+
+def _window_filters(bindings: dict[str, Any]) -> list[dict[str, Any]]:
+    window = bindings.get("time_window") or {}
+    filters: list[dict[str, Any]] = []
+    if not isinstance(window, dict):
+        return filters
+    if window.get("start"):
+        filters.append({"field": "order_date", "operator": "gte", "value": window["start"]})
+    if window.get("end"):
+        filters.append({"field": "order_date", "operator": "lte", "value": window["end"]})
+    return filters
+
+
+def _stats_arguments(bindings: dict[str, Any], group_by: str) -> dict[str, Any]:
+    arguments: dict[str, Any] = {
+        "group_by": [group_by],
+        "metrics": [dict(item) for item in _RETURN_METRICS],
+        "limit": 20,
+    }
+    filters = _window_filters(bindings)
+    if filters:
+        arguments["filters"] = filters
+    return arguments
+
+
+def _sample_arguments(bindings: dict[str, Any], group_by: str, key: str) -> dict[str, Any]:
+    filters = _window_filters(bindings)
+    filters.append({"field": group_by, "operator": "eq", "value": key})
+    return {"limit": 5, "filters": filters}
 
 
 def _window_label(bindings: dict[str, Any]) -> str:
@@ -194,36 +229,153 @@ def _as_float(value: Any) -> float:
         return 0.0
 
 
+def _group_by_of(arguments: dict[str, Any]) -> str:
+    group_by = arguments.get("group_by")
+    if isinstance(group_by, list) and group_by:
+        first = group_by[0]
+        if isinstance(first, dict):
+            return str(first.get("field") or "")
+        return str(first)
+    if isinstance(group_by, str):
+        return group_by
+    return ""
+
+
+def _is_return_query(arguments: dict[str, Any]) -> bool:
+    metric = arguments.get("metric")
+    if isinstance(metric, str) and metric.strip() in {"return_rate", "avg_returned", "sum_returned"}:
+        return True
+    metrics = arguments.get("metrics")
+    if not isinstance(metrics, list):
+        return False
+    for item in metrics:
+        if isinstance(item, str) and item.strip() in {"return_rate", "avg_returned", "sum_returned"}:
+            return True
+        if not isinstance(item, dict):
+            continue
+        field = item.get("field")
+        function = item.get("function")
+        alias = item.get("alias")
+        if field in {"returned", "return_rate"} and function in {"avg", "sum"}:
+            return True
+        if alias in {"return_rate", "avg_returned", "sum_returned"}:
+            return True
+        if function == "return_rate":
+            return True
+    return False
+
+
+def _return_stats(tool_results: list[dict[str, Any]], group_by: str) -> dict[str, Any] | None:
+    for item in tool_results:
+        if item.get("name") != "query_stats":
+            continue
+        arguments = item.get("arguments") or {}
+        if _group_by_of(arguments) == group_by and _is_return_query(arguments):
+            return item
+    return None
+
+
+def _stat_rows(stats: dict[str, Any] | None) -> list[dict[str, Any]]:
+    data = (stats or {}).get("data") or {}
+    if not isinstance(data, dict):
+        return []
+    for key in ("rows", "groups", "items"):
+        rows = data.get(key)
+        if isinstance(rows, list):
+            return [row for row in rows if isinstance(row, dict)]
+    nested = data.get("result")
+    if isinstance(nested, dict):
+        for key in ("rows", "groups", "items"):
+            rows = nested.get(key)
+            if isinstance(rows, list):
+                return [row for row in rows if isinstance(row, dict)]
+    return []
+
+
+def _rate_source(row: dict[str, Any]) -> dict[str, Any]:
+    for key in ("metrics", "values"):
+        nested = row.get(key)
+        if isinstance(nested, dict) and any(name in nested for name in ("avg_returned", "return_rate", "value")):
+            return nested
+    return row
+
+
+def _row_rate(row: dict[str, Any]) -> Any:
+    source = _rate_source(row)
+    for key in ("avg_returned", "return_rate", "value"):
+        if source.get(key) is not None:
+            return source[key]
+    return None
+
+
+def _row_dim(row: dict[str, Any], group_by: str) -> str | None:
+    if row.get("key") not in (None, ""):
+        return str(row["key"])
+    for bucket in ("dimensions", "group"):
+        nested = row.get(bucket)
+        if isinstance(nested, dict):
+            if group_by and nested.get(group_by) not in (None, ""):
+                return str(nested[group_by])
+            for field in ("channel", "category", "province"):
+                if nested.get(field) not in (None, ""):
+                    return str(nested[field])
+    if group_by and row.get(group_by) not in (None, ""):
+        return str(row[group_by])
+    for field in ("channel", "category", "province"):
+        if row.get(field) not in (None, ""):
+            return str(row[field])
+    return None
+
+
+def _format_rate(value: Any) -> str:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if 0 <= number <= 1:
+        number *= 100
+    rounded = round(number, 2)
+    if rounded == int(rounded):
+        return str(int(rounded))
+    return f"{rounded:.2f}".rstrip("0").rstrip(".")
+
+
 def _ranked(tool_results: list[dict[str, Any]]) -> list[dict[str, Any]]:
     found: list[dict[str, Any]] = []
     for group_by, label in _DIMS:
-        stats = _pick(tool_results, "query_stats", group_by=group_by, metric="return_rate")
-        rows = ((stats or {}).get("data") or {}).get("rows") or []
-        if not rows or not rows[0].get("key"):
-            continue
-        top = rows[0]
-        found.append(
-            {
+        stats = _return_stats(tool_results, group_by)
+        best: dict[str, Any] | None = None
+        for row in _stat_rows(stats):
+            key = _row_dim(row, group_by)
+            raw = _row_rate(row)
+            if not key or raw is None:
+                continue
+            rate = _as_float(raw)
+            if best is not None and rate <= best["rate"]:
+                continue
+            best = {
                 "group_by": group_by,
                 "label": label,
-                "key": str(top.get("key")),
-                "value": top.get("value"),
+                "key": key,
+                "value": raw,
                 "fingerprint": _fp(stats),
-                "rate": _as_float(top.get("value")),
+                "rate": rate,
+                "count": row.get("count"),
+                "returned_sum": row.get("sum_returned"),
             }
-        )
+        if best:
+            found.append(best)
     found.sort(key=lambda item: item["rate"], reverse=True)
     return found[:5]
 
 
 def _stats_plan(bindings: dict[str, Any]) -> list[dict[str, Any]]:
-    base = _base_args(bindings)
     return [
         {"name": "list_datasets", "arguments": {}},
         {"name": "describe_dataset", "arguments": dict(_tw_args(bindings))},
-        {"name": "query_stats", "arguments": {**base, "group_by": "channel", "metric": "return_rate", "limit": 10}},
-        {"name": "query_stats", "arguments": {**base, "group_by": "category", "metric": "return_rate", "limit": 10}},
-        {"name": "query_stats", "arguments": {**base, "group_by": "province", "metric": "return_rate", "limit": 10}},
+        {"name": "query_stats", "arguments": _stats_arguments(bindings, "channel")},
+        {"name": "query_stats", "arguments": _stats_arguments(bindings, "category")},
+        {"name": "query_stats", "arguments": _stats_arguments(bindings, "province")},
     ]
 
 
@@ -232,9 +384,8 @@ def _drill_plan(
     user_text: str,
     tool_results: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    base = _base_args(bindings)
     plan = [
-        {"name": "query_stats", "arguments": {**base, "group_by": group_by, "metric": "return_rate", "limit": 10}}
+        {"name": "query_stats", "arguments": _stats_arguments(bindings, group_by)}
         for group_by, _label in _DIMS
     ]
     index = _finding_index(user_text)
@@ -244,7 +395,7 @@ def _drill_plan(
         plan.append(
             {
                 "name": "sample_records",
-                "arguments": {**base, "limit": 5, "filters": {row["group_by"]: row["key"]}},
+                "arguments": _sample_arguments(bindings, row["group_by"], row["key"]),
             }
         )
         return plan
@@ -254,21 +405,20 @@ def _drill_plan(
         plan.append(
             {
                 "name": "sample_records",
-                "arguments": {**base, "limit": 5, "filters": {group_by: key}},
+                "arguments": _sample_arguments(bindings, group_by, key),
             }
         )
     return plan
 
 
 def _focus_plan(bindings: dict[str, Any], user_text: str) -> list[dict[str, Any]]:
-    base = _base_args(bindings)
     named = _named_focus(user_text)
     if not named:
         return _stats_plan(bindings)
     group_by, key = named
     return [
-        {"name": "query_stats", "arguments": {**base, "group_by": group_by, "metric": "return_rate", "limit": 10}},
-        {"name": "sample_records", "arguments": {**base, "limit": 5, "filters": {group_by: key}}},
+        {"name": "query_stats", "arguments": _stats_arguments(bindings, group_by)},
+        {"name": "sample_records", "arguments": _sample_arguments(bindings, group_by, key)},
     ]
 
 
@@ -285,8 +435,11 @@ def _build_report(tool_results: list[dict[str, Any]], bindings: dict[str, Any]) 
         lines.append("这次窗口里没有足够的退货聚合，建议先看样本后再排风险。")
         return "\n".join(lines)
     for index, row in enumerate(ranked, 1):
+        extra = ""
+        if row.get("returned_sum") is not None and row.get("count") not in (None, ""):
+            extra = f"（{row['count']} 单里退货 {row['returned_sum']}）"
         lines.append(
-            f"{index}. **{row['label']}退货偏高**：**{row['key']}** 退货率 {row['value']}%，建议先看。"
+            f"{index}. **{row['label']}退货偏高**：**{row['key']}** 退货率 {_format_rate(row['value'])}%{extra}，建议先看。"
         )
         lines.append(f"   - evidence: `{row['fingerprint']}`")
         lines.append("")
@@ -331,13 +484,12 @@ def _build_drill(tool_results: list[dict[str, Any]], user_text: str) -> str:
 
 
 def _rate_for(tool_results: list[dict[str, Any]], group_by: str, key: str) -> Any:
-    stats = _pick(tool_results, "query_stats", group_by=group_by, metric="return_rate")
-    rows = ((stats or {}).get("data") or {}).get("rows") or []
+    rows = _stat_rows(_return_stats(tool_results, group_by))
     for row in rows:
-        if str(row.get("key")) == key:
-            return row.get("value")
+        if _row_dim(row, group_by) == key:
+            return _row_rate(row)
     if rows:
-        return rows[0].get("value")
+        return _row_rate(rows[0])
     return None
 
 
@@ -348,7 +500,7 @@ def _build_focus(tool_results: list[dict[str, Any]], user_text: str) -> str:
     group_by, key = named
     label = dict(_DIMS).get(group_by, group_by)
     rate = _rate_for(tool_results, group_by, key)
-    rate_text = f"退货率 {rate}%，" if rate is not None else ""
+    rate_text = f"退货率 {_format_rate(rate)}%，" if rate is not None else ""
     sample = _pick(tool_results, "sample_records") or {}
     records = (sample.get("data") or {}).get("records") or []
     lines = [

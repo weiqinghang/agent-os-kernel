@@ -402,11 +402,21 @@ export function boot(doc, win) {
     }
   }
 
+  function outcomeEvents(view, events) {
+    const list = Array.isArray(events) ? events.slice() : [];
+    const status = view && view.status;
+    if (status !== "completed" && status !== "cancelled") return list;
+    const seen = list.some((ev) => {
+      if (!ev || ev.kind !== "state") return false;
+      const payload = ev.payload;
+      return !!(payload && typeof payload === "object" && payload.state === status);
+    });
+    if (!seen) list.push({ kind: "state", payload: { state: status } });
+    return list;
+  }
+
   function renderOutcome(view, events) {
-    const shown =
-      view && view.status === "cancelled"
-        ? (events || []).concat([{ kind: "state", payload: { state: "cancelled" } }])
-        : events;
+    const shown = outcomeEvents(view, events);
     paintPlan(shown);
     settlePlan();
     clearProgress();

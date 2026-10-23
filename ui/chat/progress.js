@@ -88,7 +88,7 @@ function readSignals(events) {
   let seenOutline = false;
   let successes = 0;
   let finalizing = false;
-  let cancelled = false;
+  let terminal = "";
   for (const ev of events || []) {
     if (!ev || typeof ev !== "object") continue;
     const kind = ev.kind;
@@ -116,9 +116,14 @@ function readSignals(events) {
       } else if (seenOutline && state && state !== "awaiting_hitl") {
         outline = false;
       }
-      if (state === "failed") finalizing = false;
-      else if (state === "cancelled") cancelled = true;
-      else if (state === "completed" || state === "finalizing") finalizing = true;
+      if (state === "failed") {
+        finalizing = false;
+        terminal = "failed";
+      } else if (state === "cancelled") terminal = "cancelled";
+      else if (state === "completed") {
+        finalizing = true;
+        terminal = "completed";
+      } else if (state === "finalizing") finalizing = true;
       continue;
     }
     if (kind === "model_step") {
@@ -127,7 +132,13 @@ function readSignals(events) {
     }
     if (kind === "assistant") finalizing = true;
   }
-  return { outline, successes, finalizing, cancelled };
+  return {
+    outline,
+    successes,
+    finalizing,
+    cancelled: terminal === "cancelled",
+    completed: terminal === "completed",
+  };
 }
 
 function hasWhen(rules, when) {
@@ -181,6 +192,23 @@ function markConclusion(steps, statuses, rules) {
   }
 }
 
+function finishCompleted(steps, statuses, rules) {
+  for (const rule of rules || []) {
+    if (!rule || rule.when !== "finalizing") continue;
+    if (typeof rule.label !== "string" || !rule.label) continue;
+    for (let i = 0; i < steps.length; i++) {
+      if (labelMatches(steps[i].label, rule.label)) {
+        statuses[i] = "done";
+        break;
+      }
+    }
+    break;
+  }
+  for (let i = 0; i < statuses.length; i++) {
+    if (statuses[i] !== "done") statuses[i] = "skipped";
+  }
+}
+
 /** 纯函数：步骤文案 + 已有事件 + 规则表 → 每步状态。不读工具名。 */
 export function applyPlanProgress(steps, events, rules) {
   const table = rules || PLAN_PROGRESS;
@@ -194,13 +222,14 @@ export function applyPlanProgress(steps, events, rules) {
   }
   const signals = readSignals(events);
   let statuses;
-  if (signals.outline && !signals.cancelled && hasWhen(table, "outline_confirm")) {
+  if (signals.outline && !signals.cancelled && !signals.completed && hasWhen(table, "outline_confirm")) {
     statuses = clean.map(() => "pending");
   } else {
     statuses = statusesFromCounts(clean, table, signals.successes);
-    if (signals.finalizing) markConclusion(clean, statuses, table);
+    if (signals.finalizing && !signals.completed) markConclusion(clean, statuses, table);
   }
-  if (signals.cancelled) statuses = statuses.map((status) => (status === "done" ? "done" : "skipped"));
+  if (signals.completed) finishCompleted(clean, statuses, table);
+  else if (signals.cancelled) statuses = statuses.map((status) => (status === "done" ? "done" : "skipped"));
   return clean.map((step, index) => ({ id: step.id, label: step.label, status: statuses[index] }));
 }
 

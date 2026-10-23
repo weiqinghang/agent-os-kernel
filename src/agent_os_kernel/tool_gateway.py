@@ -202,15 +202,26 @@ def _metric_from_name(name: str) -> dict[str, str] | None:
 def _normalize_metric(item: dict[str, Any]) -> dict[str, Any] | None:
     fn = item.get("function") or item.get("fn")
     alias = item.get("alias") or item.get("name")
+    if isinstance(fn, str) and fn.strip() == "return_rate":
+        return {"function": "avg", "field": "returned", "alias": "avg_returned"}
     if not isinstance(fn, str) or fn not in _FUNCTIONS:
         if isinstance(alias, str):
             return _metric_from_name(alias.strip())
         return None
     spec: dict[str, Any] = {"function": fn}
     field = item.get("field")
+    if isinstance(field, str) and field.strip() == "return_rate":
+        field = "returned"
+        if fn not in {"avg", "sum"}:
+            spec["function"] = "avg"
+            fn = "avg"
     if isinstance(field, str) and field and fn != "count":
         spec["field"] = field
-    if isinstance(alias, str) and alias.strip() and alias.strip() != fn:
+    if field == "returned" and fn == "avg" and (not isinstance(alias, str) or alias.strip() in {"", "return_rate", "avg"}):
+        spec["alias"] = "avg_returned"
+    elif field == "returned" and fn == "sum" and (not isinstance(alias, str) or alias.strip() in {"", "return_rate", "sum"}):
+        spec["alias"] = "sum_returned"
+    elif isinstance(alias, str) and alias.strip() and alias.strip() != fn:
         spec["alias"] = alias.strip()
     elif fn == "count" and isinstance(alias, str) and alias.strip():
         spec["alias"] = alias.strip()

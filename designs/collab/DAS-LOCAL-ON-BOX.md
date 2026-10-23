@@ -84,7 +84,8 @@ export APP_RUNTIME_ENV_FILE="$PWD/.env"
   | string `metric` | `metrics[]` item `{function, field?, alias}` |
   | `sum_gmv` / `sum_qty` / `avg_gmv` | `{function: sum\|avg, field: gmv\|qty, alias: <id>}` |
   | `count` | `{function: "count", alias: "count"}` (no field) |
-  | `return_rate` | `{function: "avg", field: "returned", alias: "return_rate"}` |
+  | `return_rate` | `{function: "avg", field: "returned", alias: "return_rate"}`（旧指标名；退货简报改走下一行） |
+  | `metrics` 里 `field: "returned"` 且 `function: "avg"` / `"sum"`，或 `function: "return_rate"`，或 `field: "return_rate"` | `{function: "avg"\|"sum", field: "returned", alias: "avg_returned"\|"sum_returned"}`。DAS 没有名为 `return_rate` 的指标。 |
   | `group_by` string | `[group_by]`; a list is kept and truncated to 3 |
   | `name`, `dataset`, `start`, `end`, `time_window`, string `metric` | stripped |
   | `sample_records` / `search_records` with no `return_fields` and no `evidence_preset` | `return_fields`: `order_id`, `sku`, `category`, `channel`, `province`, `order_date`, `qty`, `gmv`, `returned` |
