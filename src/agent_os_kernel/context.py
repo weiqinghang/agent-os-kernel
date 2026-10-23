@@ -109,18 +109,21 @@ def resolve_bindings(
     *,
     request: dict[str, Any] | None = None,
     session_bindings: dict[str, Any] | None = None,
+    agent_defaults: dict[str, Any] | None = None,
     skill_defaults: dict[str, Any] | None = None,
     skill_name: str | None = None,
     inherit_run: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """request ⊇ session ⊇ skill.default ⊇ {} ; optional inherit_run as session-like base.
+    """request ⊇ session ⊇ inherit_run ⊇ agent.default ⊇ skill.default ⊇ {}.
 
     Follow-ups: pass previous Run.context_bindings as inherit_run so snapshot is inherited
-    unless request/session explicitly overrides.
+    unless request/session explicitly overrides. Agent defaults beat skill defaults.
     """
     layers: list[dict[str, Any]] = [{}]
     if skill_defaults:
         layers.append(coerce_partial(skill_defaults))
+    if agent_defaults:
+        layers.append(coerce_partial(agent_defaults))
     if inherit_run:
         layers.append(coerce_partial(inherit_run))
     if session_bindings:

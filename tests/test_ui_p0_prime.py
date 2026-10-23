@@ -12,6 +12,7 @@ from agent_os_kernel.skills.insight_report import PLAN_PROGRESS, SKILL, apply_pl
 from agent_os_kernel.tool_gateway import ToolGateway
 
 scenarios(str(Path(__file__).parent / "features" / "ui_p0_prime.feature"))
+scenarios(str(Path(__file__).parent / "features" / "return_risk_ui.feature"))
 scenarios(str(Path(__file__).parent / "features" / "midflight_progress.feature"))
 scenarios(str(Path(__file__).parent / "features" / "cancel_progress.feature"))
 scenarios(str(Path(__file__).parent / "features" / "insight_plan_card.feature"))
@@ -32,6 +33,18 @@ PROGRESS_SEQUENCE = ["处理中", "思考中", "正在查询数据", "正在整�
 def _call(world, msg):
     world["snap"] = world["node"].call(msg)
     return world["snap"]
+
+
+@given("退货风险助手")
+def open_return_risk(world):
+    snap = _call(world, {"op": "reset", "url": "http://127.0.0.1:8787/?agent=return_risk.brief"})
+    assert snap["title"] == "退货风险助手"
+    assert "问我要一份洞察结论" not in snap["emptyText"]
+
+
+@given("地址栏助手参数无法识别")
+def open_unknown_agent(world):
+    _call(world, {"op": "reset", "url": "http://127.0.0.1:8787/?agent=nope"})
 
 
 @given("调试关闭的洞察助手")
@@ -453,9 +466,42 @@ def user_bubble_is(world, text):
     assert text in world["snap"]["userTexts"]
 
 
+@then("页面有退货助手深链")
+def deeplink(world):
+    assert "/?agent=return_risk.brief" in world["snap"]["assistantHrefs"]
+    assert "return_risk_brief" not in world["snap"]["body"]
+
+
+@then(parsers.parse("会话助手是 {agent_id}"))
+def session_agent(world, agent_id):
+    assert world["snap"]["sessionAgent"] == agent_id
+    assert agent_id not in world["snap"]["emptyText"]
+
+
+@then(parsers.parse("标题是「{text}」"))
+def title_is(world, text):
+    assert world["snap"]["title"] == text
+
+
+@then("退货空态没有洞察开场")
+def risk_empty_is_not_insight(world):
+    empty = world["snap"]["emptyText"]
+    assert "问我要一份洞察结论" not in empty
+    assert "近90天销量洞察" not in empty
+    assert "哪个渠道卖得最好" not in empty
+    assert "Skill" not in empty
+    assert "skill" not in empty
+
+
+@then(parsers.parse("计划卡标题是「{text}」"))
+def plan_title(world, text):
+    assert world["snap"]["planSummary"] == [text]
+
+
 @then("开场没有工程话术")
 def no_engineering_copy(world):
-    body = world["snap"]["body"]
+    # The opener is the empty state. A header link to the other assistant is not the opener.
+    body = world["snap"]["emptyText"]
     for word in ("Skill", "skill", "chip", "三拍", "退货风险"):
         assert word not in body, word
 
@@ -468,6 +514,16 @@ def conclusion_without(world, text):
 @when("运行返回带技术串的结论")
 def release_leaky(world):
     _call(world, {"op": "release", "kind": "leaky"})
+
+
+@when("运行返回风险结论")
+def release_risk(world):
+    _call(world, {"op": "release", "kind": "risk"})
+
+
+@when("后台出现退货计划事件")
+def push_risk_plan(world):
+    _call(world, {"op": "push", "kind": "risk-plan"})
 
 
 @when("运行返回带样本编号的依据")

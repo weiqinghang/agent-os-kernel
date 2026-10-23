@@ -103,7 +103,21 @@ Whitelist (on-box `tools/list` exposes the two describe tools, so they are allow
 - `search_records`
 - `sample_records`
 
-Dogfood seed id is `ecommerce_sales_v2` (200 rows imported from the overnight sales extract). Chat session default and `insight_report` default bindings use that id. `scripts/uat.sh` follows `/health`: `service=fake-das` keeps SQLite numeric checks; otherwise it asserts the seed id over `/api/mcp` and does not read `sales.db`.
+Dogfood seed id is `ecommerce_sales_v2` (same id for the insight assistant and the return-risk assistant). Chat session defaults and both skills bind that id. `scripts/uat.sh` follows `/health`: `service=fake-das` keeps SQLite numeric checks; otherwise it asserts the seed id over `/api/mcp` and does not read `sales.db`.
+
+Target scale is about **100_000** rows on that same id. Do not mint a new dataset id and do not add an MCP.
+
+Reseed the fake DAS (replaces `services/fake_das/data/sales.db`):
+
+```bash
+uv run python scripts/seed_ecommerce.py
+# default --n 100000; same id ecommerce_sales_v2
+# curl -s http://127.0.0.1:8788/health   → "rows" near 100000
+```
+
+`--ensure-alias` does not change the row count. A fake db that is still ~1e4 or ~200 rows has not been reseeded.
+
+Real DAS on this box still imports **`.xlsx` only** into the existing published id (`POST /datasets/import-jobs`, then profile → mappings → publish). The box seed script lives in the dataset-analysis-service tree. Point it at `ecommerce_sales_v2` and load about 1e5 rows there. This repo's `scripts/seed_ecommerce.py` is the fake-DAS path and the row-count contract; it does not open a second dataset.
 
 ## Smoke
 
@@ -119,7 +133,7 @@ curl -s http://127.0.0.1:8788/health
 - Import accepts **`.xlsx` only** via `POST /datasets/import-jobs` (cookie after `/ui/login`).
 - After profile → patch field mappings with `permissions` + `index_strategy=btree` → confirm → `ddl-plan` → `publish` → **`POST /datasets/{id}/indexes`**.
 - Without indexes, `query_readiness.ready=false` and `ready_only=true` hides the dataset; `group_by` / metrics fail.
-- Dogfood seed: `ecommerce_sales_v2`.
+- Dogfood seed: `ecommerce_sales_v2`, about 100_000 rows after `scripts/seed_ecommerce.py` (fake) or an in-place xlsx republish (real DAS). Same id, no new MCP.
 - `order_date` must be published as `data_type=date` so `gte` / `lte` filters validate. A text-typed duplicate of the same column fails those operators. The box seed script lives in the dataset-analysis-service tree (patched there); `scripts/seed_ecommerce.py` in this repo only fills the SQLite fake DAS and stores ISO date strings.
 
 ## Blockers / later

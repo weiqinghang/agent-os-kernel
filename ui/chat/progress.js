@@ -227,10 +227,21 @@ function collectPlanSteps(events) {
  * 取最后一条能上屏的 plan，再用规则表重算 status。
  * 事件里自带的 status 不采用。返回 null 表示还没有可显示的步骤。
  */
-export function projectPlan(events) {
+/** 退货风险简报的计数表。形状与洞察相同，通配对的是风险步骤文案。 */
+export const RETURN_RISK_PLAN_PROGRESS = [
+  { when: "outline_confirm", status: "pending" },
+  { when: "tool_calls", count: 1, label: "*窗口*" },
+  { when: "tool_calls", count: 2, label: "*渠道*" },
+  { when: "tool_calls", count: 3, label: "*类目*" },
+  { when: "tool_calls", count: 4, label: "*省*" },
+  { when: "tool_calls", count: 5, label: "*排序*" },
+  { when: "finalizing", label: "*结论*", status: "active" },
+];
+
+export function projectPlan(events, rules) {
   const steps = collectPlanSteps(events);
   if (!steps) return null;
-  return applyPlanProgress(steps, events, PLAN_PROGRESS);
+  return applyPlanProgress(steps, events, rules || PLAN_PROGRESS);
 }
 
 /** 只看 kind 与少量中性字段。不读取 name/tool/mode/id/thinking。 */

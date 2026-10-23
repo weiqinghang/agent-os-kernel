@@ -311,5 +311,6 @@ print("PASS reject SQL (jsonrpc error)")
 PY
 fi
 
-echo "UAT PASS (mode=$DAS_MODE dataset=$DATASET_ID; skill#2 deferred)"
+echo "UAT PASS (mode=$DAS_MODE dataset=$DATASET_ID; insight path)"
+echo "Skill#2: ./scripts/uat-skill2.sh"
 exit 0

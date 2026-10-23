@@ -45,6 +45,9 @@
     .progress-text { font-size:14px; }
     @keyframes breathe { 0%,100% { opacity:.35; transform:scale(.85); } 50% { opacity:1; transform:scale(1); } }
     @media (prefers-reduced-motion: reduce) { .progress-breathe { animation:none; opacity:1; } }
+    nav.assistants { display:flex; gap:8px; align-items:center; }
+    nav.assistants a { color:var(--muted); font-size:13px; text-decoration:none; padding:4px 8px; border-radius:999px; border:1px solid transparent; }
+    nav.assistants a[aria-current="page"] { color:var(--text); border-color:#334155; }
     .debug-toggle { margin-left:auto; font-size:11px; color:var(--muted); display:flex; align-items:center; gap:4px; user-select:none; }
     .debug-toggle[hidden] { display:none !important; }
     .hitl { margin-top:8px; }
@@ -75,7 +78,11 @@
 </head>
 <body>
   <header>
-    <h1>洞察报告助理</h1>
+    <nav class="assistants" aria-label="助手">
+      <a class="assistant" href="/" data-agent="insight.report">洞察报告助理</a>
+      <a class="assistant" href="/?agent=return_risk.brief" data-agent="return_risk.brief">退货风险助手</a>
+    </nav>
+    <h1 id="title">洞察报告助理</h1>
     <span class="meta" id="meta">时间窗 近90天</span>
     <label class="debug-toggle" for="debug-chain" hidden>
       <input id="debug-chain" type="checkbox" />

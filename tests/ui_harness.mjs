@@ -103,6 +103,24 @@ const LEAKY = [
   "_数字均来自 Tool Gateway；可追问下钻。_",
 ].join("\n");
 
+const RISK = [
+  "# 退货风险简报（近7天）",
+  "",
+  "按退货率从高到低，先盯这几处。",
+  "",
+  "1. **渠道退货偏高**：**拼多多** 退货率 18.2%，建议先看。",
+  "   - evidence: `aaaa1111`",
+  "",
+  "2. **类目退货偏高**：**服饰鞋包** 退货率 15%，建议先看。",
+  "   - evidence: `bbbb2222`",
+  "",
+  "3. **省份退货偏高**：**广东** 退货率 11.4%，建议先看。",
+  "   - evidence: `cccc3333`",
+  "",
+  "dataset=`ecommerce_sales_v2`",
+  "Tool Gateway",
+].join("\n");
+
 const DRILL = [
   "## 第2条依据",
   "",
@@ -302,6 +320,20 @@ function releaseSpec(kind) {
       events: [],
     };
   }
+  if (kind === "risk") {
+    return {
+      body: {
+        run_id: RUN_ID,
+        status: "completed",
+        markdown: RISK,
+        text: RISK,
+        context_bindings: {
+          time_window: { label: "近7天", start: "2025-10-15", end: "2025-10-22" },
+        },
+      },
+      events: realisticEvents(),
+    };
+  }
   if (kind === "leaky") {
     return {
       body: {
@@ -397,10 +429,22 @@ function route(window, url, options) {
   const method = String(options.method || "GET").toUpperCase();
   if (method === "POST" && url === "/sessions") {
     if (window.__sessionFail) return Promise.resolve(jsonResponse({}, 500));
+    let posted = {};
+    try {
+      posted = JSON.parse(options.body || "{}");
+    } catch (_err) {
+      posted = {};
+    }
+    window.__lastSessionBody = posted;
+    const requested = posted.bindings && posted.bindings.time_window;
+    const tw = requested && requested.label
+      ? requested
+      : { label: "近90天", start: "2025-07-25", end: "2025-10-22" };
     return Promise.resolve(
       jsonResponse({
         id: SESSION_ID,
-        bindings: { time_window: { label: "近90天", start: "2025-07-25", end: "2025-10-22" } },
+        agent_id: posted.agent_id || "insight.report",
+        bindings: { time_window: tw },
       })
     );
   }
@@ -570,6 +614,10 @@ function snapshot() {
     planTag: (doc.querySelector(".plan-card") || {}).tagName || "",
     placeholder: (doc.getElementById("inp") && doc.getElementById("inp").placeholder) || "",
     userTexts: Array.from(doc.querySelectorAll(".msg.user .body")).map((el) => el.textContent || ""),
+    emptyText: textOf(doc.querySelector(".empty-state")),
+    title: textOf(doc.querySelector("h1")),
+    sessionAgent: (win.__lastSessionBody && win.__lastSessionBody.agent_id) || "",
+    assistantHrefs: Array.from(doc.querySelectorAll("a.assistant")).map((link) => link.getAttribute("href")),
   };
 }
 
@@ -702,6 +750,32 @@ function progressExpect(kind) {
 
 async function doPush(msg) {
   const win = current.win;
+  if (msg.kind === "risk-plan") {
+    const polls = win.__polls || 0;
+    const labels = [
+      "确认退货时间窗口",
+      "看清渠道退货高低",
+      "看清类目退货高低",
+      "看清各省退货高低",
+      "整理风险排序结论",
+    ];
+    win.__events = (win.__events || []).concat(
+      stamp(win, [
+        {
+          kind: "plan",
+          payload: {
+            revision: 1,
+            steps: labels.map((label, index) => ({ id: "s" + index, label, status: "pending" })),
+          },
+        },
+        { kind: "tool_call", payload: { ok: true } },
+        { kind: "tool_call", payload: { ok: true } },
+      ])
+    );
+    await waitUntil(() => (win.__polls || 0) > polls, 800);
+    await waitUntil(() => current.doc.querySelectorAll(".plan-card li").length >= 5, 800);
+    return snapshot();
+  }
   if (msg.kind === "plan") {
     const polls = win.__polls || 0;
     win.__events = (win.__events || []).concat(stamp(win, planFixtureEvents()));

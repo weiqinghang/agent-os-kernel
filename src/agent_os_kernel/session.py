@@ -6,7 +6,7 @@ import time
 import uuid
 from typing import Any
 
-from . import context, obs
+from . import agents, context, obs
 
 
 def create_session(meta: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -14,6 +14,9 @@ def create_session(meta: dict[str, Any] | None = None) -> dict[str, Any]:
     sid = "ses_" + uuid.uuid4().hex[:12]
     now = time.time()
     meta = dict(meta or {})
+    # Blank id stays on the insight row. A known id is stored once and not rewritten later.
+    agent = agents.get(meta.get("agent_id"))
+    meta["agent_id"] = agent["id"]
     # Normalize bindings under meta.bindings
     if "bindings" in meta:
         meta["bindings"] = context.coerce_partial(meta.get("bindings") or {})
@@ -24,7 +27,13 @@ def create_session(meta: dict[str, Any] | None = None) -> dict[str, Any]:
             "INSERT INTO sessions(id, created_at, meta) VALUES (?,?,?)",
             (sid, now, json.dumps(meta, ensure_ascii=False)),
         )
-    return {"id": sid, "created_at": now, "meta": meta, "bindings": meta.get("bindings") or {}}
+    return {
+        "id": sid,
+        "created_at": now,
+        "meta": meta,
+        "agent_id": meta["agent_id"],
+        "bindings": meta.get("bindings") or {},
+    }
 
 
 def get_session(session_id: str) -> dict[str, Any] | None:
@@ -39,15 +48,18 @@ def get_session(session_id: str) -> dict[str, Any] | None:
         "id": row["id"],
         "created_at": row["created_at"],
         "meta": meta,
+        "agent_id": meta.get("agent_id") or agents.DEFAULT_AGENT_ID,
         "bindings": bindings,
     }
 
 
 def set_bindings(session_id: str, partial: dict[str, Any], *, replace: bool = False) -> dict[str, Any]:
-    """Update Session.meta.bindings (thread defaults)."""
+    """Update Session.meta.bindings (thread defaults). agent_id stays as stored."""
     s = get_session(session_id)
     if not s:
         raise KeyError("session not found")
+    if isinstance(partial, dict) and "agent_id" in partial:
+        raise ValueError("agent_id is immutable")
     meta = dict(s.get("meta") or {})
     current = context.session_bindings_from_meta(meta)
     if replace:
