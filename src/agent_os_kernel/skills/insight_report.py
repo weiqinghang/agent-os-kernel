@@ -412,7 +412,7 @@ def _progress_signals(events: list[Any] | None) -> dict[str, Any]:
     seen_outline = False
     successes = 0
     finalizing = False
-    cancelled = False
+    terminal = ""
     for event in events or []:
         if not isinstance(event, dict):
             continue
@@ -441,9 +441,13 @@ def _progress_signals(events: list[Any] | None) -> dict[str, Any]:
                 outline = False
             if state == "failed":
                 finalizing = False
+                terminal = "failed"
             elif state == "cancelled":
-                cancelled = True
-            elif state in {"completed", "finalizing"}:
+                terminal = "cancelled"
+            elif state == "completed":
+                finalizing = True
+                terminal = "completed"
+            elif state == "finalizing":
                 finalizing = True
             continue
         if kind == "model_step" and _writing_model_step(payload):
@@ -455,7 +459,8 @@ def _progress_signals(events: list[Any] | None) -> dict[str, Any]:
         "outline_confirm": outline,
         "successful_tool_calls": successes,
         "finalizing": finalizing,
-        "cancelled": cancelled,
+        "cancelled": terminal == "cancelled",
+        "completed": terminal == "completed",
     }
 
 
@@ -529,6 +534,24 @@ def _mark_conclusion(steps: list[dict[str, str]], statuses: list[str], rules: li
                 break
 
 
+def _finish_completed(steps: list[dict[str, str]], statuses: list[str], rules: list[Any]) -> None:
+    """结论已经出来：对得上的收尾步骤记完成，没跑到的步骤记跳过。"""
+    for rule in rules:
+        if not isinstance(rule, dict) or rule.get("when") != "finalizing":
+            continue
+        pattern = rule.get("label")
+        if not isinstance(pattern, str) or not pattern:
+            continue
+        for index, step in enumerate(steps):
+            if _label_matches(step["label"], pattern):
+                statuses[index] = "done"
+                break
+        break
+    for index, status in enumerate(statuses):
+        if status != "done":
+            statuses[index] = "skipped"
+
+
 def apply_plan_progress(
     steps: list[Any] | None,
     events: list[Any] | None,
@@ -543,13 +566,20 @@ def apply_plan_progress(
         table = []
     clean = _clean_progress_steps(steps)
     signals = _progress_signals(events)
-    if signals["outline_confirm"] and not signals["cancelled"] and _rule_when(table, "outline_confirm"):
+    if (
+        signals["outline_confirm"]
+        and not signals["cancelled"]
+        and not signals["completed"]
+        and _rule_when(table, "outline_confirm")
+    ):
         statuses = ["pending"] * len(clean)
     else:
         statuses = _statuses_from_counts(clean, table, signals["successful_tool_calls"])
-        if signals["finalizing"]:
+        if signals["finalizing"] and not signals["completed"]:
             _mark_conclusion(clean, statuses, table)
-    if signals["cancelled"]:
+    if signals["completed"]:
+        _finish_completed(clean, statuses, table)
+    elif signals["cancelled"]:
         statuses = ["done" if status == "done" else "skipped" for status in statuses]
     return [
         {"id": step["id"], "label": step["label"], "status": statuses[index]}

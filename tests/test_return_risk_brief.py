@@ -85,6 +85,28 @@ def _drive(text, bindings=None, canned=None):
     raise AssertionError(text)
 
 
+def _group_of(args):
+    group_by = (args or {}).get("group_by")
+    if isinstance(group_by, list):
+        return group_by[0] if group_by else None
+    return group_by
+
+
+def _flat_filters(args):
+    filters = (args or {}).get("filters") or {}
+    if isinstance(filters, dict):
+        return {key: value for key, value in filters.items() if key not in {"op", "clauses", "operator"}}
+    flat = {}
+    if isinstance(filters, list):
+        for clause in filters:
+            if not isinstance(clause, dict) or not clause.get("field"):
+                continue
+            op = clause.get("operator") or clause.get("op") or "eq"
+            if op == "eq":
+                flat[clause["field"]] = clause.get("value")
+    return flat
+
+
 def _canned(call):
     name = call.get("name")
     args = call.get("arguments") or {}
@@ -94,10 +116,10 @@ def _canned(call):
             "category": ("服饰鞋包", 9.0),
             "province": ("广东", 11.4),
         }
-        key, value = table.get(args.get("group_by"), ("未知", 1))
+        key, value = table.get(_group_of(args), ("未知", 1))
         return {"rows": [{"key": key, "value": value}, {"key": "次位", "value": 1}]}
     if name == "sample_records":
-        filters = args.get("filters") or {}
+        filters = _flat_filters(args)
         return {
             "count": 1,
             "records": [
@@ -478,6 +500,8 @@ def test_skill_edges_cover_focus_drill_and_empty():
     assert get_skill()["name"] == "return_risk_brief"
     assert "推迟" not in SKILL["system_prompt"]
     assert "偏高" in SKILL["system_prompt"]
+    assert "avg_returned" in SKILL["system_prompt"]
+    assert "metric return_rate" not in SKILL["system_prompt"]
     assert SKILL["hitl_kinds"] == ["outline_confirm"]
     assert 1 <= len(SKILL["plan_steps"]) <= 5
     assert _as_float("nope") == 0.0
@@ -503,7 +527,7 @@ def test_skill_edges_cover_focus_drill_and_empty():
     def empty_sample(call):
         if call.get("name") == "sample_records":
             return {"count": 0, "records": []}
-        if call.get("name") == "query_stats" and (call.get("arguments") or {}).get("group_by") == "channel":
+        if call.get("name") == "query_stats" and _group_of(call.get("arguments") or {}) == "channel":
             return {"rows": [{"key": "天猫", "value": "bad"}]}
         return _canned(call)
 
@@ -528,3 +552,132 @@ def test_skill_edges_cover_focus_drill_and_empty():
     )
     assert no_tools["type"] == "final"
     assert "推迟" not in no_tools["content"]
+
+
+def _numbered(content: str) -> list[str]:
+    return [line for line in content.splitlines() if line[:2] in {f"{n}." for n in range(1, 6)}]
+
+
+def test_real_returned_rows_rank_without_key_value():
+    def canned(call):
+        if call.get("name") != "query_stats":
+            return _canned(call)
+        group = _group_of(call.get("arguments") or {})
+        if group == "channel":
+            return {
+                "rows": [
+                    {"avg_returned": 0.5},
+                    {"channel": "京东", "avg_returned": 0.06, "sum_returned": 12, "count": 200},
+                    {"channel": "拼多多", "avg_returned": 0.13, "sum_returned": 26, "count": 200},
+                ]
+            }
+        if group == "category":
+            return {"rows": [{"category": "服饰鞋包", "metrics": {"avg_returned": 0.09}}]}
+        if group == "province":
+            return {
+                "result": {
+                    "rows": [
+                        {"dimensions": {"province": "广东"}, "values": {"avg_returned": 0.11}},
+                    ]
+                }
+            }
+        return {"rows": []}
+
+    report = _drive("近7天退货风险", canned=canned)
+    numbered = _numbered(report["content"])
+    assert 3 <= len(numbered) <= 5
+    assert "没有足够" not in report["content"]
+    assert "拼多多" in numbered[0]
+    assert "退货率 13%" in numbered[0]
+    assert "200 单里退货 26" in numbered[0]
+    assert "广东" in report["content"]
+    assert "退货率 11%" in report["content"]
+    assert "服饰鞋包" in report["content"]
+    assert "退货率 9%" in report["content"]
+    drill = _drive("第1条依据是什么", canned=canned)
+    assert "第1条依据" in drill["content"]
+    assert "拼多多" in drill["content"]
+    assert drill["samples"]
+    assert all(item["channel"] == "拼多多" for item in drill["samples"])
+    focus = _drive("只看拼多多", canned=canned)
+    assert "拼多多" in focus["content"]
+    assert "退货率 13%" in focus["content"]
+    assert "没有抽到这个范围的样本" not in focus["content"]
+
+
+def test_fake_das_near7_avg_returned_brief(tmp_path, monkeypatch):
+    from services.fake_das import app as fake
+
+    db = tmp_path / "sales.db"
+    _seed_module().seed(db, n=4000)
+    monkeypatch.setattr(fake, "DB_PATH", db)
+    bindings = _bindings()
+    allowed = list(SKILL["allowed_tools"])
+    decision = stub_decide(
+        messages=[{"role": "user", "content": "近7天退货风险"}],
+        allowed_tools=allowed,
+        tool_results=[],
+        bindings=bindings,
+    )
+    assert decision["type"] == "tool_calls"
+    channel = next(
+        call
+        for call in decision["calls"]
+        if call["name"] == "query_stats" and _group_of(call["arguments"]) == "channel"
+    )
+    assert channel["arguments"]["metrics"] == [
+        {"function": "avg", "field": "returned", "alias": "avg_returned"}
+    ]
+    assert channel["arguments"]["group_by"] == ["channel"]
+    assert {"field": "order_date", "operator": "gte", "value": "2025-10-15"} in channel["arguments"]["filters"]
+    assert {"field": "order_date", "operator": "lte", "value": "2025-10-22"} in channel["arguments"]["filters"]
+    assert "metric" not in channel["arguments"]
+    results = []
+    for call in decision["calls"]:
+        name = call["name"]
+        args = call.get("arguments") or {}
+        if name == "query_stats":
+            data = fake._query_stats(args)
+            assert data["rows"]
+            assert data["rows"][0].get("avg_returned") is not None
+        elif name == "describe_dataset":
+            data = fake._describe_dataset(args)
+        else:
+            data = fake._list_datasets(args)
+        results.append(_tool(name, args, data, "fp-" + name))
+    final = stub_decide(
+        messages=[{"role": "user", "content": "近7天退货风险"}],
+        allowed_tools=allowed,
+        tool_results=results,
+        bindings=bindings,
+    )
+    assert final["type"] == "final"
+    numbered = _numbered(final["content"])
+    assert 3 <= len(numbered) <= 5
+    assert "没有足够" not in final["content"]
+    assert "拼多多" in numbered[0]
+    assert "退货率" in numbered[0]
+    assert "%" in numbered[0]
+
+    drill = stub_decide(
+        messages=[{"role": "user", "content": "第1条依据是什么"}],
+        allowed_tools=allowed,
+        tool_results=results,
+        bindings=bindings,
+    )
+    assert drill["type"] == "tool_calls"
+    sample_call = next(call for call in drill["calls"] if call["name"] == "sample_records")
+    assert {"field": "channel", "operator": "eq", "value": "拼多多"} in sample_call["arguments"]["filters"]
+    sample = fake._sample_records(sample_call["arguments"])
+    assert sample["records"]
+    assert all(row["channel"] == "拼多多" for row in sample["records"])
+    shown = stub_decide(
+        messages=[{"role": "user", "content": "第1条依据是什么"}],
+        allowed_tools=allowed,
+        tool_results=results + [_tool("sample_records", sample_call["arguments"], sample)],
+        bindings=bindings,
+    )
+    assert shown["type"] == "final"
+    assert "第1条依据" in shown["content"]
+    assert "拼多多" in shown["content"]
+    assert "没有抽到" not in shown["content"]

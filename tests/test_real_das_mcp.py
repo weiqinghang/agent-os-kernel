@@ -911,6 +911,21 @@ def test_adapt_real_argument_edges():
         "query_stats", {"dataset_id": SEED, "metric": {"fn": "sum", "field": "gmv"}}
     )["metrics"] == [{"function": "sum", "field": "gmv"}]
     assert adapt_real_arguments(
+        "query_stats",
+        {
+            "dataset_id": SEED,
+            "metrics": [{"function": "avg", "field": "return_rate", "alias": "return_rate"}],
+        },
+    )["metrics"] == [{"function": "avg", "field": "returned", "alias": "avg_returned"}]
+    assert adapt_real_arguments(
+        "query_stats",
+        {"dataset_id": SEED, "metrics": [{"function": "return_rate"}]},
+    )["metrics"] == [{"function": "avg", "field": "returned", "alias": "avg_returned"}]
+    assert adapt_real_arguments(
+        "query_stats",
+        {"dataset_id": SEED, "metrics": [{"function": "sum", "field": "returned"}]},
+    )["metrics"] == [{"function": "sum", "field": "returned", "alias": "sum_returned"}]
+    assert adapt_real_arguments(
         "query_stats", {"dataset_id": SEED, "metrics": {"function": "min", "alias": "min"}}
     )["metrics"] == [{"function": "min"}]
     assert adapt_real_arguments(
