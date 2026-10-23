@@ -8,7 +8,7 @@ from . import insight_report, return_risk_brief
 # Explicit register — write-once at import
 _REGISTRY: dict[str, dict[str, Any]] = {
     insight_report.SKILL["name"]: insight_report.SKILL,
-    return_risk_brief.SKILL["name"]: return_risk_brief.SKILL,  # deferred stub
+    return_risk_brief.SKILL["name"]: return_risk_brief.SKILL,
 }
 
 _STUB: dict[str, Callable[..., dict[str, Any]]] = {

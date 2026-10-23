@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Seed ~10_000 ecommerce sales rows into SQLite for fake-das."""
+"""Seed ~100_000 ecommerce sales rows into SQLite for fake-das.
+
+Same dataset id `ecommerce_sales_v2`. This does not create a dataset or an MCP.
+Default `--n` is 100000. `--ensure-alias` only adds the id to an existing file
+and does not grow the row count; rerun without that flag to reseed.
+"""
 from __future__ import annotations
 
 import argparse
@@ -25,7 +30,10 @@ PROVINCES = [
 ]
 
 
-def seed(db_path: Path, n: int = 10_000, seed_val: int = 42) -> int:
+DEFAULT_N = 100_000
+
+
+def seed(db_path: Path, n: int = DEFAULT_N, seed_val: int = 42) -> int:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     if db_path.exists():
         db_path.unlink()
@@ -112,7 +120,7 @@ def seed(db_path: Path, n: int = 10_000, seed_val: int = 42) -> int:
     # ecommerce_sales_v2 is the dogfood seed id (real DAS). Keep the overnight
     # name as an alias so older sessions still resolve on the fake path.
     for name, description in (
-        ("ecommerce_sales_v2", "电商销量狗粮种子（与真 DAS seed 同 id）"),
+        ("ecommerce_sales_v2", "电商销量狗粮种子（与真 DAS seed 同 id，约 10 万行）"),
         ("ecommerce_sales", "近90天电商订单行（POC 自造，别名）"),
     ):
         cur.execute(
@@ -158,7 +166,7 @@ def ensure_dataset_alias(db_path: Path, name: str = "ecommerce_sales_v2") -> Non
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--db", type=Path, default=DEFAULT_DB)
-    p.add_argument("--n", type=int, default=10_000)
+    p.add_argument("--n", type=int, default=DEFAULT_N)
     p.add_argument(
         "--ensure-alias",
         action="store_true",

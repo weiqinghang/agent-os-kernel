@@ -101,7 +101,10 @@ def given_insight_plan(box):
 
 @given("一份没有计划步骤的 Skill")
 def given_deferred(box):
-    box["skill"] = "return_risk_brief"
+    # The contract is "no plan_steps means no plan event". The return-risk skill now has steps,
+    # so this fixture clears them on the insight manifest and finishes without a tool round.
+    _patch_skill(box, plan_steps=[], hitl_kinds=[], hitl_prompts={})
+    box["no_plan"] = True
     box["expect"] = []
 
 
@@ -143,15 +146,19 @@ def given_manual(box):
 @when("用户发出洞察请求并跑完")
 def run_through(box):
     _open(box, skill=box.get("skill") or "insight_report")
-    if box.get("skill") != "return_risk_brief":
-        _install_gateway(box["monkeypatch"])
+    _install_gateway(box["monkeypatch"])
     box["result"] = orchestrator.handle_user_message(box["sid"], box["rid"], REPORT)
 
 
 @when("用户发出该 Skill 的请求并跑完")
 def run_deferred(box):
-    _open(box, text="看一下退货", skill="return_risk_brief")
-    box["result"] = orchestrator.handle_user_message(box["sid"], box["rid"], "看一下退货")
+    box["monkeypatch"].setattr(
+        model_broker,
+        "decide",
+        lambda **_kwargs: {"type": "final", "content": "没有计划步骤，直接结束。"},
+    )
+    _open(box, text="看一下范围", skill="insight_report")
+    box["result"] = orchestrator.handle_user_message(box["sid"], box["rid"], "看一下范围")
 
 
 @when("用户发出洞察请求并停在大纲")
@@ -231,7 +238,7 @@ def no_phase_kinds(box):
     kinds = [event["kind"] for event in obs.list_events(box["rid"])]
     assert kinds
     assert not any(kind.startswith("phase_") for kind in kinds)
-    assert "plan" in kinds or box.get("skill") == "return_risk_brief"
+    assert "plan" in kinds or box.get("no_plan")
 
 
 def test_plan_copy_ignores_empty_declarations():

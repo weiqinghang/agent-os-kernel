@@ -2,7 +2,8 @@
 
 企业 Agent 通用框架（AI OS 控制面）内核仓库。
 
-- **狗粮 #1：** 聊天式洞察报告助理（结论页 + 同线程追问 + DAS MCP）
+- **狗粮 #1：** 聊天式洞察报告助理（结论页 + 同线程追问 + DAS MCP），助手 id `insight.report`
+- **狗粮 #2：** 退货风险助手（`return_risk.brief` / `return_risk_brief`），同一 `ecommerce_sales_v2`，默认近 7 天。深链 `/?agent=return_risk.brief`。种子约 10 万行：`uv run python scripts/seed_ecommerce.py`
 - **形态：** 模块化单体；八层控制面可简陋但要齐
 - **协作：** 不强制 Playbook；用 `designs/collab/` 事件日志观测角色协作
 

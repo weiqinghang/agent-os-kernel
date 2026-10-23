@@ -28,7 +28,7 @@ GET http://127.0.0.1:8787/health → {"status":"ok","service":"agent-os-kernel",
 
 ## Data
 
-- SQLite: `services/fake_das/data/sales.db` — **10000** rows；总 GMV **11838497.57**；省份第一 **江苏**
+- SQLite: `services/fake_das/data/sales.db`（gitignore）— 种子默认 **100000** 行，数据集 id 仍是 `ecommerce_sales_v2`。重种：`uv run python scripts/seed_ecommerce.py`
 - Kernel DB: `data/kernel.db`
 - UAT log: `data/uat-last.log` → **UAT PASS**
 - Sample run: `run_3cbdbe50347f` (08:24 UAT) events include model_step + 6× tool_call

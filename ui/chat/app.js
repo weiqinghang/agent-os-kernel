@@ -6,6 +6,7 @@
 import {
   IMMEDIATE,
   PLAN_STATUS_TEXT,
+  RETURN_RISK_PLAN_PROGRESS,
   debugLines,
   presentAssistant,
   project,
@@ -15,7 +16,42 @@ import {
   visibleAssistant,
 } from "./progress.js";
 
-const EXAMPLES = ["近90天销量洞察", "哪个渠道卖得最好", "哪些省贡献最大"];
+const ASSISTANTS = {
+  "insight.report": {
+    id: "insight.report",
+    displayName: "洞察报告助理",
+    emptyTitle: "问我要一份洞察结论",
+    emptyHint: "会前直接点一个例子，或写下你想看的范围。",
+    examples: ["近90天销量洞察", "哪个渠道卖得最好", "哪些省贡献最大"],
+    placeholder: "描述你想看的范围或问题",
+    defaultTw: { label: "近90天", start: "2025-07-25", end: "2025-10-22" },
+    planTitle: "报告大纲",
+    planRules: null,
+    rebindRun: (label) => "用" + label + "再出一版洞察报告",
+    rebindHold: (label) => "已改：时间窗→" + label + "。需要时再说「出一份洞察报告」。",
+    rebindIdle: (label) => "已改：时间窗→" + label + "。可以说「写一份洞察报告」。",
+  },
+  "return_risk.brief": {
+    id: "return_risk.brief",
+    displayName: "退货风险助手",
+    emptyTitle: "周会前，先看哪儿在爆退",
+    emptyHint: "点一个例子，或直接问最近哪里退货偏高。",
+    examples: ["近7天退货风险", "哪些渠道退货偏高", "哪些类目在爆退"],
+    placeholder: "问问最近哪里在爆退",
+    defaultTw: { label: "近7天", start: "2025-10-15", end: "2025-10-22" },
+    planTitle: "风险范围",
+    planRules: RETURN_RISK_PLAN_PROGRESS,
+    rebindRun: (label) => "用" + label + "再出一版退货风险简报",
+    rebindHold: (label) => "已改：时间窗→" + label + "。需要时再说「出一份退货风险简报」。",
+    rebindIdle: (label) => "已改：时间窗→" + label + "。可以说「近7天退货风险」。",
+  },
+};
+
+function assistantFromLocation(win) {
+  const search = (win.location && win.location.search) || "";
+  const id = new URLSearchParams(search).get("agent") || "";
+  return ASSISTANTS[id] || ASSISTANTS["insight.report"];
+}
 
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, (c) => ({
@@ -48,13 +84,30 @@ export function boot(doc, win) {
   const meta = doc.getElementById("meta");
   const chipsEl = doc.getElementById("chips");
 
+  const profile = assistantFromLocation(win);
   let sessionId = null;
   let activeRunId = null;
   let pendingCancel = null;
   let pendingHitl = null;
   let hasConclusion = false;
-  let currentTw = { label: "近90天", start: "2025-07-25", end: "2025-10-22" };
+  let currentTw = {
+    label: profile.defaultTw.label,
+    start: profile.defaultTw.start,
+    end: profile.defaultTw.end,
+  };
   let pendingRebind = null;
+
+  const titleEl = doc.getElementById("title");
+  if (titleEl) titleEl.textContent = profile.displayName;
+  if (doc.title != null) doc.title = profile.displayName;
+  if (inp) inp.placeholder = profile.placeholder;
+  doc.querySelectorAll("a.assistant").forEach((link) => {
+    const current = link.getAttribute("data-agent") === profile.id;
+    if (current) link.setAttribute("aria-current", "page");
+    else link.removeAttribute("aria-current");
+  });
+  setChipActive(chipKey(currentTw));
+  refreshMeta();
 
   function noteStrips() {
     const n = doc.querySelectorAll(".progress-strip").length;
@@ -112,14 +165,14 @@ export function boot(doc, win) {
     roleEl.textContent = "助理";
     const title = doc.createElement("p");
     title.className = "empty-title";
-    title.textContent = "问我要一份洞察结论";
+    title.textContent = profile.emptyTitle;
     const hint = doc.createElement("p");
     hint.className = "empty-hint";
-    hint.textContent = "会前直接点一个例子，或写下你想看的范围。";
+    hint.textContent = profile.emptyHint;
     div.appendChild(roleEl);
     div.appendChild(title);
     div.appendChild(hint);
-    EXAMPLES.forEach((question) => {
+    profile.examples.forEach((question) => {
       const btn = doc.createElement("button");
       btn.type = "button";
       btn.className = "example";
@@ -177,7 +230,7 @@ export function boot(doc, win) {
   }
 
   function paintPlan(events) {
-    const steps = projectPlan(events);
+    const steps = projectPlan(events, profile.planRules);
     if (!steps) return;
     let card = doc.querySelector(".plan-card.is-current");
     if (!card) {
@@ -185,7 +238,7 @@ export function boot(doc, win) {
       card.className = "plan-card is-current";
       card.open = true;
       const summary = doc.createElement("summary");
-      summary.textContent = "报告大纲";
+      summary.textContent = profile.planTitle;
       card.appendChild(summary);
       const list = doc.createElement("ol");
       list.className = "plan-steps";
@@ -447,8 +500,8 @@ export function boot(doc, win) {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
+        agent_id: profile.id,
         bindings: {
-          skill: "insight_report",
           dataset: "ecommerce_sales_v2",
           time_window: currentTw,
         },
@@ -491,7 +544,7 @@ export function boot(doc, win) {
     ok.type = "button";
     ok.textContent = "确认";
     ok.onclick = async () => {
-      const text = "用" + tw.label + "再出一版洞察报告";
+      const text = profile.rebindRun(tw.label);
       try {
         card.remove();
         pendingRebind = null;
@@ -513,7 +566,7 @@ export function boot(doc, win) {
         pendingRebind = null;
         await patchSessionTw(tw);
         setChipActive(chipKey(tw));
-        addMsg("assistant", "已改：时间窗→" + tw.label + "。需要时再说「出一份洞察报告」。");
+        addMsg("assistant", profile.rebindHold(tw.label));
       } catch (_) {
         addMsg("assistant", visibleAssistant("failed", ""));
       }
@@ -540,7 +593,7 @@ export function boot(doc, win) {
       else {
         await patchSessionTw(tw);
         setChipActive(chipKey(tw));
-        addMsg("assistant", "已改：时间窗→" + tw.label + "。可以说「写一份洞察报告」。");
+        addMsg("assistant", profile.rebindIdle(tw.label));
       }
     } catch (_) {
       addMsg("assistant", visibleAssistant("failed", ""));

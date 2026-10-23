@@ -12,7 +12,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import context, hitl, model_broker, obs, orchestrator, run, session
+from . import agents, context, hitl, model_broker, obs, orchestrator, run, session
 from .skills import registry
 from .tool_gateway import ToolGateway
 
@@ -47,24 +47,54 @@ def health() -> dict[str, Any]:
 class SessionCreate(BaseModel):
     meta: dict[str, Any] = Field(default_factory=dict)
     bindings: dict[str, Any] | None = None
+    agent_id: str | None = None
+
+
+def _agent_or_400(agent_id: str | None) -> dict[str, Any]:
+    try:
+        return agents.get(agent_id)
+    except KeyError as exc:
+        raise HTTPException(400, str(exc)) from None
+
+
+def _fill_session_bindings(agent: dict[str, Any], raw: dict[str, Any]) -> dict[str, Any]:
+    """Agent skill is fixed. Missing dataset or window comes from agent, then skill."""
+    bindings = context.coerce_partial(raw)
+    requested = bindings.get("skill")
+    skills = list(agent.get("skills") or [])
+    if requested and requested not in skills:
+        raise HTTPException(400, "skill is not on this agent")
+    skill_name = requested or (skills[0] if skills else registry.default_name())
+    try:
+        manifest = registry.get(skill_name)
+    except KeyError as exc:
+        raise HTTPException(400, str(exc)) from None
+    if not bindings.get("time_window") or not bindings.get("dataset"):
+        base = context.deep_merge(
+            context.coerce_partial(manifest.get("default_bindings") or {}),
+            context.coerce_partial(agent.get("default_bindings") or {}),
+        )
+        bindings = context.deep_merge(base, bindings)
+    bindings["skill"] = skill_name
+    return bindings
 
 
 @app.post("/sessions")
 def create_session(body: SessionCreate | None = None) -> dict[str, Any]:
     meta = dict((body.meta if body else None) or {})
+    if body and body.agent_id:
+        meta["agent_id"] = body.agent_id
     if body and body.bindings:
         meta["bindings"] = body.bindings
-    # seed default time_window if missing (demo-friendly)
+    agent = _agent_or_400(meta.get("agent_id"))
+    meta["agent_id"] = agent["id"]
     if "bindings" not in meta:
         meta["bindings"] = {}
-    b = context.coerce_partial(meta.get("bindings") or {})
-    if not b.get("time_window"):
-        skill = registry.get(b.get("skill") or registry.default_name())
-        defaults = skill.get("default_bindings") or {}
-        b = context.deep_merge(context.coerce_partial(defaults), b)
-        b["skill"] = b.get("skill") or registry.default_name()
-    meta["bindings"] = b
-    return session.create_session(meta)
+    meta["bindings"] = _fill_session_bindings(agent, meta.get("bindings") or {})
+    try:
+        return session.create_session(meta)
+    except KeyError as exc:
+        raise HTTPException(400, str(exc)) from None
 
 
 @app.get("/sessions/{session_id}")
@@ -89,6 +119,8 @@ def patch_bindings(session_id: str, body: BindingsPatch) -> dict[str, Any]:
         s = session.set_bindings(session_id, body.bindings, replace=body.replace)
     except KeyError:
         raise HTTPException(404, "session not found") from None
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from None
     return {"id": s["id"], "bindings": s.get("bindings") or {}, "meta": s.get("meta")}
 
 
@@ -148,6 +180,8 @@ def _resolve_for_message(
     if not s:
         raise HTTPException(404, "session not found")
     sess_b = s.get("bindings") or context.session_bindings_from_meta(s.get("meta"))
+    agent = _agent_or_400((s.get("meta") or {}).get("agent_id"))
+    allowed_skills = list(agent.get("skills") or [])
     req: dict[str, Any] = dict(body.bindings or {})
     if body.skill:
         req["skill"] = body.skill
@@ -156,16 +190,20 @@ def _resolve_for_message(
         req.get("skill")
         or sess_b.get("skill")
         or (inherit or {}).get("skill")
-        or registry.default_name()
+        or (allowed_skills[0] if allowed_skills else registry.default_name())
     )
+    if allowed_skills and skill_name not in allowed_skills:
+        raise HTTPException(400, "skill is not on this agent")
     try:
         manifest = registry.get(skill_name)
     except KeyError as e:
         raise HTTPException(400, str(e)) from e
-    # Follow-ups inherit prior Run snapshot unless request/session overrides
+    # Follow-ups inherit prior Run snapshot unless request/session overrides.
+    # Agent defaults sit under that snapshot and above the skill defaults.
     resolved = context.resolve_bindings(
         request=req or None,
         session_bindings=sess_b,
+        agent_defaults=agent.get("default_bindings"),
         skill_defaults=manifest.get("default_bindings"),
         skill_name=skill_name,
         inherit_run=inherit,
@@ -333,6 +371,12 @@ def get_run_events(
 @app.get("/skills")
 def skills() -> dict[str, Any]:
     return {"skills": registry.list_skills(), "default": registry.default_name()}
+
+
+@app.get("/agents")
+def list_agent_records() -> dict[str, Any]:
+    """Startup catalog. Display names are for the shell; ids are not a hot-plug console."""
+    return {"agents": agents.list_agents(), "default": agents.DEFAULT_AGENT_ID}
 
 
 @app.get("/tools")
