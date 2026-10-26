@@ -613,6 +613,7 @@ function snapshot() {
     planSummary: Array.from(doc.querySelectorAll(".plan-card summary")).map((el) => textOf(el)),
     planTag: (doc.querySelector(".plan-card") || {}).tagName || "",
     placeholder: (doc.getElementById("inp") && doc.getElementById("inp").placeholder) || "",
+    composer: (doc.getElementById("inp") && doc.getElementById("inp").value) || "",
     userTexts: Array.from(doc.querySelectorAll(".msg.user .body")).map((el) => el.textContent || ""),
     emptyText: textOf(doc.querySelector(".empty-state")),
     title: textOf(doc.querySelector("h1")),
@@ -650,6 +651,45 @@ async function doReset(msg) {
 async function doSend(text) {
   const { doc, win } = current;
   doc.getElementById("inp").value = text;
+  doc.getElementById("f").dispatchEvent(new win.Event("submit", { bubbles: true, cancelable: true }));
+  await wait(40);
+  return snapshot();
+}
+
+async function doComposeEnter(msg) {
+  const { doc, win } = current;
+  const inp = doc.getElementById("inp");
+  const text = (msg && msg.text) || "";
+  inp.value = text;
+  inp.dispatchEvent(new win.CompositionEvent("compositionstart", { data: text, bubbles: true }));
+  inp.dispatchEvent(
+    new win.KeyboardEvent("keydown", {
+      key: "Enter",
+      code: "Enter",
+      keyCode: 229,
+      isComposing: true,
+      bubbles: true,
+      cancelable: true,
+    })
+  );
+  doc.getElementById("f").dispatchEvent(new win.Event("submit", { bubbles: true, cancelable: true }));
+  await wait(40);
+  return snapshot();
+}
+
+async function doComposeEndEnter(msg) {
+  const { doc, win } = current;
+  const inp = doc.getElementById("inp");
+  const text = (msg && msg.text) || "";
+  inp.dispatchEvent(new win.CompositionEvent("compositionend", { data: inp.value, bubbles: true }));
+  inp.value = text;
+  const down = new win.KeyboardEvent("keydown", {
+    key: "Enter",
+    code: "Enter",
+    bubbles: true,
+    cancelable: true,
+  });
+  inp.dispatchEvent(down);
   doc.getElementById("f").dispatchEvent(new win.Event("submit", { bubbles: true, cancelable: true }));
   await wait(40);
   return snapshot();
@@ -970,6 +1010,8 @@ async function doLabel() {
 async function handle(msg) {
   if (msg.op === "reset") return doReset(msg);
   if (msg.op === "send") return doSend(msg.text || "");
+  if (msg.op === "compose-enter") return doComposeEnter(msg);
+  if (msg.op === "compose-end-enter") return doComposeEndEnter(msg);
   if (msg.op === "blank") return doSend("   ");
   if (msg.op === "release") return doRelease(msg);
   if (msg.op === "accept") return doAccept(msg);

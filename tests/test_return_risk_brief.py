@@ -1081,7 +1081,7 @@ def test_sample_line_gmv_trims_long_tail():
     assert _format_gmv(110) == "110"
     assert _format_gmv(88.5) == "88.5"
     assert _format_gmv("不是数字") == "不是数字"
-    assert _format_gmv(None) == "None"
+    assert _format_gmv(None) == "—"
     assert _format_gmv(True) == "True"
     assert _format_gmv("") == ""
     assert _format_gmv(float("nan")) == "nan"

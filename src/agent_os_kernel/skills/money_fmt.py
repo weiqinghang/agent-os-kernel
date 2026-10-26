@@ -6,8 +6,10 @@ from typing import Any
 
 def format_gmv(value: Any) -> str:
     """Money-like sample GMV: 2 decimal places, then drop a long float tail."""
-    if isinstance(value, bool) or value is None:
+    if isinstance(value, bool):
         return str(value)
+    if value is None:
+        return "—"
     if isinstance(value, str):
         text = value.strip()
         if not text:
