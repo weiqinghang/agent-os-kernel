@@ -650,8 +650,32 @@ export function boot(doc, win) {
     }
   }
 
-  form.addEventListener("submit", (e) => {
-    e.preventDefault();
+  let imeComposing = false;
+
+  function imeActive(event) {
+    const code = event && event.keyCode;
+    return imeComposing || !!(event && event.isComposing) || code === 229;
+  }
+
+  if (inp) {
+    inp.addEventListener("compositionstart", () => {
+      imeComposing = true;
+    });
+    inp.addEventListener("compositionend", () => {
+      imeComposing = false;
+    });
+    inp.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" && imeActive(event)) {
+        event.preventDefault();
+      }
+    });
+  }
+
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    if (imeActive(event)) {
+      return;
+    }
     submitText(inp.value);
   });
 

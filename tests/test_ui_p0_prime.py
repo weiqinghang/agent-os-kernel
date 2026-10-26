@@ -961,3 +961,30 @@ def counted_done(kernel):
     blob = json.dumps(progress, ensure_ascii=False)
     for name in names:
         assert name not in blob
+
+
+@when(parsers.parse("用户在输入法组合「{text}」时按下回车"))
+def compose_enter(world, text):
+    _call(world, {"op": "compose-enter", "text": text})
+
+
+@when(parsers.parse("用户结束输入法组合后按回车发送「{text}」"))
+def compose_end_enter(world, text):
+    _call(world, {"op": "compose-end-enter", "text": text})
+
+
+@then("对话里没有用户气泡")
+def no_user_bubble(world):
+    assert world["snap"]["userTexts"] == []
+    assert world["snap"]["messagePosts"] == 0
+
+
+@then(parsers.parse("输入框仍是「{text}」"))
+def composer_kept(world, text):
+    assert world["snap"]["composer"] == text
+
+
+@then(parsers.parse("用户气泡是「{text}」"))
+def user_bubble_is(world, text):
+    assert text in world["snap"]["userTexts"]
+    assert world["snap"]["messagePosts"] >= 1

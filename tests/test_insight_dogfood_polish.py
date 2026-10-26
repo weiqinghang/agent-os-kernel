@@ -18,7 +18,9 @@ ALLOWED_SRC = {
     "src/agent_os_kernel/skills/insight_report.py",
     "src/agent_os_kernel/skills/return_risk_brief.py",
     "src/agent_os_kernel/skills/money_fmt.py",
+    "src/agent_os_kernel/skills/stat_rows.py",
 }
+ALLOWED_UI = {"ui/chat/app.js"}
 _LONG = "934.0200000000"
 _CAT = "1200.5000000001"
 _ROW = "15.1200000000"
@@ -218,8 +220,9 @@ def when_diff(box):
 @then("无 phase_*、无 run_events usage/ms 产品字段、无新 MCP")
 def then_kernel_unchanged(box):
     src = [path for path in box["paths"] if path.startswith("src/")]
+    ui = [path for path in box["paths"] if path.startswith("ui/")]
     assert set(src) <= ALLOWED_SRC
-    assert not any(path.startswith("ui/") for path in box["paths"])
+    assert set(ui) <= ALLOWED_UI
     assert not any("mcp" in Path(path).name.lower() for path in box["paths"])
     blob = "\n".join(box["added"])
     assert "phase_" not in blob

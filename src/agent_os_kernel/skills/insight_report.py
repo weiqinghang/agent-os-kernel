@@ -7,6 +7,7 @@ from typing import Any
 
 from ..context import SEED_DATASET_ID
 from .money_fmt import format_gmv
+from .stat_rows import dash, first_present, normalize_stat_row, row_dimension, stat_call_matches, stat_dicts
 
 # 计划卡进度只看计数和步骤文案通配，不看工具名。编排不按步骤编号推进。
 PLAN_PROGRESS: list[dict[str, Any]] = [
@@ -88,25 +89,55 @@ def _have(tool_results: list[dict[str, Any]]) -> set[str]:
 
 
 def _pick(tool_results: list[dict[str, Any]], name: str, **arg_match: Any) -> dict[str, Any] | None:
-    for t in tool_results:
-        if t.get("name") != name:
+    group_by = arg_match.get("group_by")
+    metric = arg_match.get("metric")
+    tolerant = (
+        name == "query_stats"
+        and isinstance(group_by, str)
+        and isinstance(metric, str)
+        and set(arg_match) <= {"group_by", "metric"}
+    )
+    fallback = None
+    tolerant_hit = None
+    for item in tool_results:
+        if item.get("name") != name:
             continue
-        args = t.get("arguments") or {}
-        if all(args.get(k) == v for k, v in arg_match.items()):
-            return t
-    for t in tool_results:
-        if t.get("name") == name:
-            return t
-    return None
+        if fallback is None:
+            fallback = item
+        args = item.get("arguments") or {}
+        if arg_match and all(args.get(key) == value for key, value in arg_match.items()):
+            return item
+        if tolerant and tolerant_hit is None and stat_call_matches(args, group_by, metric):
+            tolerant_hit = item
+    if tolerant_hit is not None:
+        return tolerant_hit
+    return fallback
 
 
-def _fmt_rows(rows: list[dict[str, Any]], n: int = 5, *, fmt=None) -> str:
-    def show(value: Any) -> Any:
-        if fmt is None:
-            return value
-        return fmt(value)
+def _fmt_rows(
+    rows: list[dict[str, Any]],
+    n: int = 5,
+    *,
+    fmt=None,
+    group_by: str | None = None,
+    metric: str | None = None,
+) -> str:
+    parts: list[str] = []
+    for raw in list(rows)[:n]:
+        if not isinstance(raw, dict):
+            continue
+        item = normalize_stat_row(raw, group_by=group_by, metric=metric)
+        if item.get("key") in (None, "") and item.get("value") is None:
+            continue
+        shown = fmt(item.get("value")) if fmt is not None else dash(item.get("value"))
+        parts.append(f"{dash(item.get('key'))}={shown}")
+    return "；".join(parts)
 
-    return "；".join(f"{r.get('key')}={show(r.get('value'))}" for r in rows[:n])
+
+def _stat_rows(tool_results: list[dict[str, Any]], group_by: str, metric: str) -> list[dict[str, Any]]:
+    picked = _pick(tool_results, "query_stats", group_by=group_by, metric=metric) or {}
+    data = picked.get("data") if isinstance(picked.get("data"), dict) else {}
+    return stat_dicts(data)
 
 
 def _fp(t: dict[str, Any] | None) -> str:
@@ -191,10 +222,10 @@ def _finding_index(user_text: str) -> int | None:
 
 
 def _top_key(tool_results: list[dict[str, Any]], group_by: str, metric: str) -> str | None:
-    stats = _pick(tool_results, "query_stats", group_by=group_by, metric=metric)
-    rows = ((stats or {}).get("data") or {}).get("rows") or []
-    if rows and rows[0].get("key"):
-        return str(rows[0]["key"])
+    for row in _stat_rows(tool_results, group_by, metric):
+        key = row_dimension(row, group_by)
+        if key:
+            return key
     return None
 
 
@@ -243,47 +274,61 @@ def _followup_plan(intent: str, bindings: dict[str, Any]) -> list[dict[str, Any]
     return plans.get(intent, plans["province"])
 
 
+def _headline(rows: list[dict[str, Any]], group_by: str, metric: str) -> dict[str, Any]:
+    parsed = [normalize_stat_row(row, group_by=group_by, metric=metric) for row in rows if isinstance(row, dict)]
+    for item in parsed:
+        if item.get("key") not in (None, ""):
+            return item
+    return parsed[0] if parsed else {"key": None, "value": None}
+
+
 def _build_report(tool_results: list[dict[str, Any]], bindings: dict[str, Any]) -> str:
     tw = bindings.get("time_window") or {}
     label = (tw.get("label") if isinstance(tw, dict) else None) or "当前时间窗"
     desc_t = _pick(tool_results, "describe_dataset") or {}
-    desc = desc_t.get("data") or {}
-    summary = desc.get("summary") or {}
-    by_cat = (_pick(tool_results, "query_stats", group_by="category", metric="sum_gmv") or {}).get("data") or {}
-    by_ch = (_pick(tool_results, "query_stats", group_by="channel", metric="sum_gmv") or {}).get("data") or {}
-    by_prov = (_pick(tool_results, "query_stats", group_by="province", metric="sum_gmv") or {}).get("data") or {}
-    ret_ch = (_pick(tool_results, "query_stats", group_by="channel", metric="return_rate") or {}).get("data") or {}
-    top_cat = (by_cat.get("rows") or [{}])[0]
-    top_ch = (by_ch.get("rows") or [{}])[0]
-    top_prov = (by_prov.get("rows") or [{}])[0]
-    worst_ret = (ret_ch.get("rows") or [{}])[0]
-    start = tw.get("start") if isinstance(tw, dict) else "?"
-    end = tw.get("end") if isinstance(tw, dict) else "?"
+    desc = desc_t.get("data") if isinstance(desc_t.get("data"), dict) else {}
+    summary = desc.get("summary") if isinstance(desc.get("summary"), dict) else {}
+    cat_rows = _stat_rows(tool_results, "category", "sum_gmv")
+    ch_rows = _stat_rows(tool_results, "channel", "sum_gmv")
+    prov_rows = _stat_rows(tool_results, "province", "sum_gmv")
+    ret_rows = _stat_rows(tool_results, "channel", "return_rate")
+    top_cat = _headline(cat_rows, "category", "sum_gmv")
+    top_ch = _headline(ch_rows, "channel", "sum_gmv")
+    top_prov = _headline(prov_rows, "province", "sum_gmv")
+    worst_ret = _headline(ret_rows, "channel", "return_rate")
+    start = first_present(tw.get("start")) if isinstance(tw, dict) else "?"
+    end = first_present(tw.get("end")) if isinstance(tw, dict) else "?"
+    dataset = first_present(bindings.get("dataset"))
+    row_count = first_present(desc.get("row_count"), summary.get("filtered_rows"))
+    min_date = first_present(summary.get("min_date"), desc.get("min_date"))
+    max_date = first_present(summary.get("max_date"), desc.get("max_date"))
+    total_gmv = first_present(summary.get("total_gmv"), desc.get("total_gmv"), fallback=None)
+    return_pct = first_present(summary.get("return_pct"), desc.get("return_pct"))
     lines = [
         f"# 电商销量洞察报告（{label}）",
         "",
-        f"**范围**：本批销量数据 {bindings.get('dataset')}；"
+        f"**范围**：本批销量数据 {dataset}；"
         f"时间窗 {start} ~ {end}（{label}）。",
-        f"**数据概览**：共 {desc.get('row_count', summary.get('filtered_rows', '—'))} 行；"
-        f"日期 {summary.get('min_date')} ~ {summary.get('max_date')}；"
-        f"总 GMV ≈ {format_gmv(summary.get('total_gmv'))}；整体退货率 {summary.get('return_pct')}%。",
+        f"**数据概览**：共 {row_count} 行；"
+        f"日期 {min_date} ~ {max_date}；"
+        f"总 GMV ≈ {format_gmv(total_gmv)}；整体退货率 {return_pct}%。",
         f"_evidence: {_fp(desc_t)}_",
         "",
         "## 发现",
         "",
-        f"1. **类目集中**：GMV 最高类目为 **{top_cat.get('key')}**（{format_gmv(top_cat.get('value'))}）。"
-        f" Top：{_fmt_rows(by_cat.get('rows') or [], fmt=format_gmv)}。",
+        f"1. **类目集中**：GMV 最高类目为 **{dash(top_cat.get('key'))}**（{format_gmv(top_cat.get('value'))}）。"
+        f" Top：{_fmt_rows(cat_rows, fmt=format_gmv, group_by='category', metric='sum_gmv')}。",
         f"   - evidence: `{_fp(_pick(tool_results, 'query_stats', group_by='category', metric='sum_gmv'))}`",
         "",
-        f"2. **渠道结构**：GMV 最高渠道为 **{top_ch.get('key')}**（{format_gmv(top_ch.get('value'))}）。"
-        f" Top：{_fmt_rows(by_ch.get('rows') or [], fmt=format_gmv)}。",
+        f"2. **渠道结构**：GMV 最高渠道为 **{dash(top_ch.get('key'))}**（{format_gmv(top_ch.get('value'))}）。"
+        f" Top：{_fmt_rows(ch_rows, fmt=format_gmv, group_by='channel', metric='sum_gmv')}。",
         f"   - evidence: `{_fp(_pick(tool_results, 'query_stats', group_by='channel', metric='sum_gmv'))}`",
         "",
-        f"3. **区域贡献**：GMV 最高省份为 **{top_prov.get('key')}**（{format_gmv(top_prov.get('value'))}）。"
-        f" Top：{_fmt_rows(by_prov.get('rows') or [], fmt=format_gmv)}。",
+        f"3. **区域贡献**：GMV 最高省份为 **{dash(top_prov.get('key'))}**（{format_gmv(top_prov.get('value'))}）。"
+        f" Top：{_fmt_rows(prov_rows, fmt=format_gmv, group_by='province', metric='sum_gmv')}。",
         f"   - evidence: `{_fp(_pick(tool_results, 'query_stats', group_by='province', metric='sum_gmv'))}`",
         "",
-        f"4. **退货风险**：按渠道退货率最高为 **{worst_ret.get('key')}**（{worst_ret.get('value')}%）。",
+        f"4. **退货风险**：按渠道退货率最高为 **{dash(worst_ret.get('key'))}**（{dash(worst_ret.get('value'))}%）。",
         f"   - evidence: `{_fp(_pick(tool_results, 'query_stats', group_by='channel', metric='return_rate'))}`",
         "",
         "---",
@@ -323,14 +368,28 @@ def _build_drill(tool_results: list[dict[str, Any]], user_text: str = "") -> str
     return "\n".join(lines)
 
 
+_FOLLOWUP_SPEC = {
+    "province": ("province", "sum_gmv", True),
+    "channel": ("channel", "sum_gmv", True),
+    "category": ("category", "sum_gmv", True),
+    "return": ("channel", "return_rate", False),
+}
+
+
 def _build_followup(intent: str, tool_results: list[dict[str, Any]]) -> str:
     t = tool_results[-1] if tool_results else {}
-    data = t.get("data") or {}
-    rows = data.get("rows") or []
+    data = t.get("data") if isinstance(t.get("data"), dict) else {}
+    group_by, metric, amount = _FOLLOWUP_SPEC.get(intent, ("province", "sum_gmv", True))
+    rows = stat_dicts(data)
+    parsed = [
+        item
+        for item in (normalize_stat_row(row, group_by=group_by, metric=metric) for row in rows)
+        if item.get("key") not in (None, "") or item.get("value") is not None
+    ]
     fp = _fp(t)
-    if not rows:
+    if not parsed:
         return f"未能从 DAS 取到聚合（intent={intent}）。\n\n_evidence: `{fp}`_"
-    top = rows[0]
+    top = parsed[0]
     labels = {
         "province": ("省份 GMV 排名", "GMV"),
         "channel": ("渠道 GMV", "GMV"),
@@ -339,11 +398,10 @@ def _build_followup(intent: str, tool_results: list[dict[str, Any]]) -> str:
     }
     title, unit = labels.get(intent, ("汇总", ""))
     suffix = "%" if intent == "return" else ""
-    amount = intent != "return"
-    top_value = format_gmv(top.get("value")) if amount else top.get("value")
+    top_value = format_gmv(top.get("value")) if amount else dash(top.get("value"))
     return (
-        f"**{title}**（最高：**{top.get('key')}**，{unit}={top_value}{suffix}）\n\n"
-        f"{_fmt_rows(rows, 8, fmt=format_gmv if amount else None)}\n\n"
+        f"**{title}**（最高：**{dash(top.get('key'))}**，{unit}={top_value}{suffix}）\n\n"
+        f"{_fmt_rows(rows, 8, fmt=format_gmv if amount else None, group_by=group_by, metric=metric)}\n\n"
         f"_evidence: `{fp}`_"
     )
 
